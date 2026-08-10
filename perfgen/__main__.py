@@ -67,17 +67,16 @@ def main(argv: list[str] | None = None) -> int:
 def _parse(workbook_path: Path, out_dir: Path) -> int:
     result = parse_workbook(workbook_path)
 
-    # Structural gaps (an enabled profile with no user count, shares that miss 100) are found by
-    # inspecting the assembled IR. Reporting them together with the parse gaps means the user
-    # fixes the spreadsheet once instead of discovering the next problem at emit time.
-    gaps = list(result.gaps)
-    if result.ir is not None:
-        gaps.extend(detect_gaps(result.ir, pre_probe=True))
-        result.ir.gaps = gaps
+    # parse_workbook already folds the structural checks in, so everything wrong with the
+    # spreadsheet arrives in one list rather than one problem per run.
+    gaps = result.gaps
 
     if gaps:
         print(f"Gaps found in {workbook_path}:", file=sys.stderr)
         print(format_gaps(gaps), file=sys.stderr)
+
+    for note in result.notes:
+        print(f"  [note]     {note}", file=sys.stderr)
 
     if result.ir is None or blocking(gaps):
         count = len(blocking(gaps))

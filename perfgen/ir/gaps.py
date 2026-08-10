@@ -6,7 +6,7 @@ is missing, not an exception on the first one. Blocking gaps stop the run with a
 
 from __future__ import annotations
 
-from perfgen.ir.models import Gap, ProfileId, Severity, TestPlanIR
+from perfgen.ir.models import Auth, Flow, Gap, LoadProfile, ProfileId, Severity, TestPlanIR
 
 # The sheet row each profile occupies in the workbook, so a gap message can name the cell to fill
 # in rather than an abstract field path.
@@ -29,15 +29,21 @@ def detect_gaps(ir: TestPlanIR, *, pre_probe: bool = False) -> list[Gap]:
     the same hole means the script cannot read a token at all.
     """
     gaps: list[Gap] = []
-    gaps.extend(_load_profile_gaps(ir))
-    gaps.extend(_flow_gaps(ir))
-    gaps.extend(_auth_gaps(ir, pre_probe=pre_probe))
+    gaps.extend(load_profile_gaps(ir.load_profiles))
+    gaps.extend(flow_gaps(ir.flows))
+    gaps.extend(auth_gaps(ir.auth, pre_probe=pre_probe))
     return gaps
 
 
-def _load_profile_gaps(ir: TestPlanIR) -> list[Gap]:
+def load_profile_gaps(profiles: list[LoadProfile]) -> list[Gap]:
+    """Structural checks over load profiles.
+
+    Takes the parsed list rather than a whole IR, so the workbook parser can report these even
+    when a missing Application name stopped it assembling an IR at all. A user should not have to
+    fix the top of the first sheet before being told the last sheet is blank.
+    """
     gaps: list[Gap] = []
-    for profile in ir.load_profiles:
+    for profile in profiles:
         if not profile.enabled:
             continue
         row, label = _PROFILE_ROW[profile.id]
@@ -82,7 +88,7 @@ def _load_profile_gaps(ir: TestPlanIR) -> list[Gap]:
                     ),
                 )
             )
-    if not ir.enabled_profiles:
+    if profiles and not any(p.enabled for p in profiles):
         gaps.append(
             Gap(
                 field="load_profiles",
@@ -96,19 +102,13 @@ def _load_profile_gaps(ir: TestPlanIR) -> list[Gap]:
     return gaps
 
 
-def _flow_gaps(ir: TestPlanIR) -> list[Gap]:
+def flow_gaps(flows: list[Flow]) -> list[Gap]:
+    """Structural checks over flows. Emptiness is reported by whoever read the sheet."""
     gaps: list[Gap] = []
-    if not ir.flows:
-        gaps.append(
-            Gap(
-                field="flows",
-                severity=Severity.BLOCKING,
-                message="The 'Flows' sheet has no rows. At least one flow is needed.",
-            )
-        )
+    if not flows:
         return gaps
 
-    total = sum(f.share_pct for f in ir.flows)
+    total = sum(f.share_pct for f in flows)
     if total != 100:
         gaps.append(
             Gap(
@@ -116,7 +116,7 @@ def _flow_gaps(ir: TestPlanIR) -> list[Gap]:
                 severity=Severity.WARNING,
                 message=(
                     f"'Share of load %' totals {total}, not 100, across "
-                    f"{len(ir.flows)} flow(s). Thread counts are apportioned from the total as "
+                    f"{len(flows)} flow(s). Thread counts are apportioned from the total as "
                     "given, so the split will not match what was intended."
                 ),
             )
@@ -124,21 +124,21 @@ def _flow_gaps(ir: TestPlanIR) -> list[Gap]:
     return gaps
 
 
-def _auth_gaps(ir: TestPlanIR, *, pre_probe: bool = False) -> list[Gap]:
+def auth_gaps(auth: Auth, *, pre_probe: bool = False) -> list[Gap]:
     gaps: list[Gap] = []
-    if ir.auth.refresh_required:
+    if auth.refresh_required:
         gaps.append(
             Gap(
                 field="auth.refresh_required",
                 severity=Severity.WARNING,
                 message=(
                     f"A test runs longer than the token lifetime of "
-                    f"{ir.auth.lifetime_seconds}s. The generated script does not refresh the "
+                    f"{auth.lifetime_seconds}s. The generated script does not refresh the "
                     "token and will start failing mid-run when it expires."
                 ),
             )
         )
-    if ir.auth.token_extract is not None and ir.auth.token_extract.expr is None:
+    if auth.token_extract is not None and auth.token_extract.expr is None:
         gaps.append(
             Gap(
                 field="auth.token_extract.expr",

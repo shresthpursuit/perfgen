@@ -305,3 +305,21 @@ def drop_application_row(spec: WorkbookSpec, label: str) -> WorkbookSpec:
 
 def profile_row(spec: WorkbookSpec, test_type: str) -> list:
     return next(row for row in spec.profiles if row[0] == test_type)
+
+
+def blank_spec() -> WorkbookSpec:
+    """The shipped blank template: every Value cell empty, no data rows, Examples still present.
+
+    Mirrors `data/specs/template.xlsx` - the Load profiles sheet keeps its four test-type names
+    with everything else blank, and the Application sheet keeps every label with an empty Value
+    and a populated Example. This is the state a brand new user's first run is in, so it is the
+    case the gap report has to handle in one pass.
+    """
+    spec = WorkbookSpec()
+    spec.application = [(label, None, example) for label, _, example in DEFAULT_APPLICATION]
+    spec.flows = []
+    spec.steps = []
+    spec.profiles = [[name, None, None, None, None, None, None] for name in
+                     ["Baseline", "Peak load", "Capacity / overload", "Endurance"]]
+    spec.slas = []
+    return spec

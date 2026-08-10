@@ -6,6 +6,15 @@
 # Generated artifacts
 outputs/
 logs/
+
+# IR generated from a real specification. The brief treats the IR as a reviewable artifact that
+# belongs in git, and in general it should be - but IR parsed from a real spec carries live URLs
+# and infrastructure names, so it stays untracked until there is a rule for what is safe to
+# commit. Same open question as probe-record redaction; not one to answer by default.
+# Synthetic fixture IR under tests/fixtures/ir/ is unaffected and stays tracked.
+data/ir/
+
+# Probe records: real request and response payloads.
 data/probe/
 
 # JMeter run artifacts

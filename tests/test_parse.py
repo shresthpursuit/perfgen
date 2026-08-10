@@ -24,6 +24,7 @@ from perfgen.parse import parse_workbook
 from tests.fixtures.workbooks import (
     DEFAULT_APPLICATION,
     WorkbookSpec,
+    blank_spec,
     drop_application_row,
     profile_row,
     set_application_value,
@@ -44,10 +45,16 @@ def gap_for(result, field_path: str):
 # --------------------------------------------------------------------------------------------
 
 
-def test_valid_workbook_parses_without_gaps(tmp_path):
+def test_valid_workbook_parses_without_blocking_gaps(tmp_path):
     result = parse(tmp_path)
-    assert result.gaps == []
+    assert result.blocking == []
     assert result.ok
+
+
+def test_valid_workbook_still_reports_its_structural_warnings(tmp_path):
+    """Parsing folds in the structural checks, so nothing is saved up for emit time."""
+    fields = {g.field for g in parse(tmp_path).gaps}
+    assert fields == {"auth.refresh_required", "auth.token_extract.expr"}
 
 
 def test_application_fields(tmp_path):
@@ -261,6 +268,78 @@ def test_everything_mangled_at_once(tmp_path):
 
 
 # --------------------------------------------------------------------------------------------
+# The blank template: one run must produce the whole list
+# --------------------------------------------------------------------------------------------
+
+# Everything a completely empty specification is missing. A new user's first run looks like this,
+# and getting a partial list means fixing the sheet, re-running, and discovering the next problem
+# - three rounds instead of one.
+BLANK_TEMPLATE_BLOCKING_FIELDS = {
+    "application.name",
+    "application.base_url",
+    "auth.type",
+    "flows",
+    "flows.steps",
+    "load_profiles",
+}
+
+
+def test_blank_template_reports_every_blocking_field_in_one_run(tmp_path):
+    result = parse(tmp_path, blank_spec())
+
+    assert result.ir is None
+    assert {g.field for g in result.blocking} == BLANK_TEMPLATE_BLOCKING_FIELDS, (
+        "a blank template must report its whole blocking list in a single run"
+    )
+
+
+def test_blank_template_load_profiles_gap_is_not_masked_by_the_application_sheet(tmp_path):
+    """The regression this test exists for: an unbuildable IR used to hide the later sheets."""
+    gap = gap_for(parse(tmp_path, blank_spec()), "load_profiles")
+    assert gap is not None and gap.severity is Severity.BLOCKING
+    assert "marked Required" in gap.message
+
+
+def test_blank_template_reports_both_flows_and_flow_steps_separately(tmp_path):
+    result = parse(tmp_path, blank_spec())
+    flows_gap = gap_for(result, "flows")
+    steps_gap = gap_for(result, "flows.steps")
+    assert flows_gap is not None and "'Flows' sheet has no rows" in flows_gap.message
+    assert steps_gap is not None and "'Flow steps' sheet has no rows" in steps_gap.message
+
+
+def test_blank_template_says_auth_fields_cannot_be_judged_yet(tmp_path):
+    """With Auth type unknown, the dependent fields are neither required nor not - say so."""
+    result = parse(tmp_path, blank_spec())
+    assert any("depends on 'Auth type'" in note for note in result.notes)
+    assert not any(g.field == "auth.token_request.url" for g in result.gaps), (
+        "a token endpoint must not be demanded before the auth type is known"
+    )
+
+
+def test_blank_template_every_message_names_a_sheet(tmp_path):
+    """A field path alone does not tell a user which cell to go and fill in."""
+    sheets = ("Application", "Flows", "Flow steps", "Load profiles", "SLA")
+    for gap in parse(tmp_path, blank_spec()).blocking:
+        assert any(name in gap.message for name in sheets), gap
+
+
+def test_fixing_the_application_sheet_does_not_reveal_new_blockers(tmp_path):
+    """The point of one-pass reporting: the second run has strictly fewer problems, not different
+    ones."""
+    first = {g.field for g in parse(tmp_path, blank_spec()).blocking}
+
+    spec = blank_spec()
+    set_application_value(spec, "Application name", "Fixed")
+    set_application_value(spec, "Base URL", "https://fixed.example.internal")
+    set_application_value(spec, "Auth type", "None")
+    set_application_value(spec, "Account model", "Single shared")
+    second = {g.field for g in parse(tmp_path, spec).blocking}
+
+    assert second < first, f"new blockers appeared on the second run: {second - first}"
+
+
+# --------------------------------------------------------------------------------------------
 # Missing and invalid input: collected, never invented
 # --------------------------------------------------------------------------------------------
 
@@ -366,6 +445,22 @@ def test_unknown_test_type_row_warns_and_is_ignored(tmp_path):
     result = parse(tmp_path, spec)
     assert any(g.field == "load_profiles" and g.severity is Severity.WARNING for g in result.gaps)
     assert len(result.ir.load_profiles) == 4
+
+
+def test_empty_sla_sheet_is_a_note_not_a_gap(tmp_path):
+    """SLAs are optional, so an empty sheet is legal - but silence leaves the user guessing."""
+    spec = WorkbookSpec()
+    spec.slas = []
+    result = parse(tmp_path, spec)
+
+    assert result.ok
+    assert not any("sla" in g.field for g in result.gaps)
+    assert any("'SLA' sheet has no targets" in note for note in result.notes)
+    assert result.ir.sla == []
+
+
+def test_populated_sla_sheet_produces_no_note(tmp_path):
+    assert not any("SLA" in note for note in parse(tmp_path).notes)
 
 
 def test_unreadable_sla_row_warns_and_is_skipped(tmp_path):

@@ -19,6 +19,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+from perfgen.ir.gaps import auth_gaps, flow_gaps, load_profile_gaps
 from perfgen.ir.models import (
     Application,
     Auth,
@@ -72,6 +73,12 @@ EXPECTED_PROFILES = ["Baseline", "Peak load", "Capacity / overload", "Endurance"
 class ParseResult:
     ir: TestPlanIR | None
     gaps: list[Gap] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    """Things worth stating that are not problems - e.g. an optional sheet left empty.
+
+    A user who leaves the SLA sheet blank should be told it was read and was empty, rather than
+    being left to wonder whether it was checked at all. That is not a gap: it is a legal spec.
+    """
 
     @property
     def blocking(self) -> list[Gap]:
@@ -87,12 +94,19 @@ class _Collector:
 
     def __init__(self) -> None:
         self.gaps: list[Gap] = []
+        self.notes: list[str] = []
 
     def blocking(self, field_path: str, message: str) -> None:
         self.gaps.append(Gap(field=field_path, severity=Severity.BLOCKING, message=message))
 
     def warning(self, field_path: str, message: str) -> None:
         self.gaps.append(Gap(field=field_path, severity=Severity.WARNING, message=message))
+
+    def note(self, message: str) -> None:
+        self.notes.append(message)
+
+    def has_field(self, field_path: str) -> bool:
+        return any(g.field == field_path for g in self.gaps)
 
     def missing_sheet(self, name: str) -> None:
         self.blocking(
@@ -103,7 +117,12 @@ class _Collector:
 
 
 def parse_workbook(path: str | Path) -> ParseResult:
-    """Read a specification workbook and build the IR, collecting every gap on the way."""
+    """Read a specification workbook and build the IR, collecting every gap on the way.
+
+    Every sheet is read and reported on whatever happened to the ones before it. A blank template
+    should produce its whole list of blocking fields in one run: making the user fix the top of
+    the first sheet before being told the last sheet is empty turns one report into three.
+    """
     source = Path(path)
     collector = _Collector()
     workbook = load_workbook(source, data_only=True, read_only=False)
@@ -113,8 +132,15 @@ def parse_workbook(path: str | Path) -> ParseResult:
     profiles = _parse_profiles(workbook, collector)
     slas = _parse_sla(workbook, collector)
 
+    # Structural checks run on the parsed lists, not on an assembled IR, so they still report when
+    # the IR could not be built. These take the parsed values as given; per-row problems have
+    # already been recorded above, and a field already reported is not reported twice.
+    for gap in [*load_profile_gaps(profiles), *flow_gaps(flows), *auth_gaps(auth, pre_probe=True)]:
+        if not collector.has_field(gap.field):
+            collector.gaps.append(gap)
+
     if application is None:
-        return ParseResult(ir=None, gaps=collector.gaps)
+        return ParseResult(ir=None, gaps=collector.gaps, notes=collector.notes)
 
     provenance = Provenance(
         source_workbook=source.name,
@@ -137,11 +163,16 @@ def parse_workbook(path: str | Path) -> ParseResult:
             "ir",
             f"The spec could not be assembled into a valid test plan: {exc}",
         )
-        return ParseResult(ir=None, gaps=collector.gaps)
+        return ParseResult(ir=None, gaps=collector.gaps, notes=collector.notes)
 
-    # refresh_required is derived during validation, so any warning about it is added afterwards.
+    # refresh_required is only derived once the IR validates, so its warning cannot be raised from
+    # the parsed auth object above and is added here instead.
+    for gap in auth_gaps(ir.auth, pre_probe=True):
+        if not collector.has_field(gap.field):
+            collector.gaps.append(gap)
+
     ir.gaps = collector.gaps
-    return ParseResult(ir=ir, gaps=collector.gaps)
+    return ParseResult(ir=ir, gaps=collector.gaps, notes=collector.notes)
 
 
 # --------------------------------------------------------------------------------------------
@@ -228,6 +259,26 @@ def _parse_auth(labelled: LabelledSheet, collector: _Collector) -> Auth:
                 f"{_where('Application', labelled.row_of('Auth type'))}: 'Auth type' is "
                 f"{cell_text(raw_type)!r}, which is not a recognised value. Choose one of: "
                 f"{', '.join(sorted(AUTH_TYPES))}.",
+            )
+        # The remaining auth fields are conditionally required - a token endpoint is needed for an
+        # OAuth flow and meaningless for 'None' - so with the type unknown they cannot be judged.
+        # Say that, rather than either inventing requirements or staying silent.
+        unset = [
+            label
+            for label in (
+                "Token endpoint URL",
+                "Auth header name",
+                "Auth header value format",
+                "Account model",
+            )
+            if cell_text(labelled.get(label)) is None
+        ]
+        if unset:
+            collector.note(
+                "The remaining authentication fields ("
+                + ", ".join(f"'{label}'" for label in unset)
+                + ") are empty. Whether they are required depends on 'Auth type', so they will "
+                "be checked once that is set."
             )
         return Auth(type=AuthType.NONE)
 
@@ -435,9 +486,14 @@ def _parse_flows(workbook, collector: _Collector) -> list[Flow]:
         )
 
     if not flows:
+        detail = (
+            "The 'Flows' sheet has no rows."
+            if not seen
+            else "No usable flows were found on the 'Flows' sheet."
+        )
         collector.blocking(
             "flows",
-            "No usable flows were found on the 'Flows' sheet. At least one is needed.",
+            f"{detail} At least one flow is needed - one row per business process being tested.",
         )
     return flows
 
@@ -458,7 +514,9 @@ def _parse_steps(workbook, collector: _Collector) -> dict[str, list[Step]]:
         return {}
 
     collected: dict[str, list[tuple[int, Step]]] = {}
+    saw_any_row = False
     for row_index, cells in iter_data_rows(sheet, header, key_column=id_column):
+        saw_any_row = True
         flow_id = cell_text(cells.get(id_column))
         assert flow_id is not None
         location = _where("Flow steps", row_index)
@@ -508,6 +566,12 @@ def _parse_steps(workbook, collector: _Collector) -> dict[str, list[Step]]:
             expected_status=expected_status,
         )
         collected.setdefault(flow_id, []).append((row_index, step))
+
+    if not saw_any_row:
+        collector.blocking(
+            "flows.steps",
+            "The 'Flow steps' sheet has no rows. Every API call the test makes is one row here.",
+        )
 
     result: dict[str, list[Step]] = {}
     for flow_id, entries in collected.items():
@@ -668,6 +732,13 @@ def _parse_sla(workbook, collector: _Collector) -> list[Sla]:
             continue
 
         slas.append(Sla(scope=scope or "all", metric=metric, target=target, unit=unit))
+
+    if not slas:
+        # Legal, not a gap - but say it was read, so nobody wonders whether it was checked.
+        collector.note(
+            "The 'SLA' sheet has no targets. That is allowed: no pass/fail criteria file will be "
+            "written, and the generated script is unaffected either way."
+        )
     return slas
 
 
