@@ -105,7 +105,7 @@ def _check_pairing(root: etree._Element, report: ValidationReport) -> None:
         children = [child for child in hash_tree if isinstance(child.tag, str)]
         if len(children) % 2 != 0:
             report.errors.append(
-                f"hashTree has {len(children)} children — elements must be followed by a paired "
+                f"hashTree has {len(children)} children - elements must be followed by a paired "
                 f"hashTree, so the count is always even. Children: {[c.tag for c in children]}"
             )
             continue

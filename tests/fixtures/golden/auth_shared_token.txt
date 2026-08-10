@@ -194,7 +194,7 @@ NOTE: flows F02 were not probed (marked unsafe for this environment); their corr
             intProp:Assertion.test_type=8
         ConstantTimer [Think time] guiclass=ConstantTimerGui testclass=ConstantTimer
           stringProp:ConstantTimer.delay=3000
-      ConstantThroughputTimer [Throughput — F01] guiclass=TestBeanGUI testclass=ConstantThroughputTimer
+      ConstantThroughputTimer [Throughput - F01] guiclass=TestBeanGUI testclass=ConstantThroughputTimer
         intProp:calcMode=2
         stringProp:throughput=${__P(tput_F01,12.0)}
     ThreadGroup [F02 - Submit new request] guiclass=ThreadGroupGui testclass=ThreadGroup
@@ -260,6 +260,6 @@ NOTE: flows F02 were not probed (marked unsafe for this environment); their corr
             intProp:Assertion.test_type=8
         ConstantTimer [Think time] guiclass=ConstantTimerGui testclass=ConstantTimer
           stringProp:ConstantTimer.delay=5000
-      ConstantThroughputTimer [Throughput — F02] guiclass=TestBeanGUI testclass=ConstantThroughputTimer
+      ConstantThroughputTimer [Throughput - F02] guiclass=TestBeanGUI testclass=ConstantThroughputTimer
         intProp:calcMode=2
         stringProp:throughput=${__P(tput_F02,8.0)}

@@ -8,8 +8,9 @@ from __future__ import annotations
 import yaml
 
 from perfgen.__main__ import main
-from perfgen.ir.io import dump_ir
+from perfgen.ir.io import dump_ir, load_ir
 from perfgen.validate import validate_file
+from tests.fixtures.workbooks import WorkbookSpec, set_application_value, write_workbook
 
 
 def test_emit_writes_jmx_properties_and_sla(tmp_path, auth_shared_token):
@@ -108,3 +109,80 @@ def test_output_is_namespaced_per_application(tmp_path, simple_flow, auth_shared
 
     assert (out_root / "catalogue_browse").is_dir()
     assert (out_root / "order_management").is_dir()
+
+
+# --------------------------------------------------------------------------------------------
+# perfgen parse - workbooks are always generated, never the shipped data/specs/*.xlsx
+# --------------------------------------------------------------------------------------------
+
+
+def test_parse_writes_an_ir_file(tmp_path):
+    workbook = write_workbook(tmp_path / "spec.xlsx")
+    exit_code = main(["parse", str(workbook), "--out", str(tmp_path / "ir")])
+
+    assert exit_code == 0
+    target = tmp_path / "ir" / "claims_intake_service.yaml"
+    assert target.exists()
+
+    ir = load_ir(target)
+    assert ir.application.name == "Claims intake service"
+    assert len(ir.flows) == 2
+
+
+def test_parse_output_is_valid_ir_that_round_trips(tmp_path):
+    workbook = write_workbook(tmp_path / "spec.xlsx")
+    main(["parse", str(workbook), "--out", str(tmp_path / "ir")])
+    ir = load_ir(tmp_path / "ir" / "claims_intake_service.yaml")
+    assert ir.provenance.source_workbook == "spec.xlsx"
+
+
+def test_parse_exits_non_zero_on_a_blocking_gap_and_writes_nothing(tmp_path, capsys):
+    spec = set_application_value(WorkbookSpec(), "Base URL", None)
+    workbook = write_workbook(tmp_path / "spec.xlsx", spec)
+    out_dir = tmp_path / "ir"
+
+    exit_code = main(["parse", str(workbook), "--out", str(out_dir)])
+
+    assert exit_code == 1
+    assert not out_dir.exists(), "no IR should be written when a blocking gap is present"
+    stderr = capsys.readouterr().err
+    assert "BLOCKING" in stderr
+    assert "Base URL" in stderr
+
+
+def test_parse_reports_warnings_but_still_succeeds(tmp_path, capsys):
+    spec = set_application_value(WorkbookSpec(), "Auth header value format", "Bearer")
+    workbook = write_workbook(tmp_path / "spec.xlsx", spec)
+    assert main(["parse", str(workbook), "--out", str(tmp_path / "ir")]) == 0
+    assert "warning" in capsys.readouterr().err
+
+
+def test_parse_surfaces_structural_gaps_not_just_parse_gaps(tmp_path, capsys):
+    """D3 lives in detect_gaps; parse must report it so the sheet is fixed in one pass."""
+    spec = WorkbookSpec()
+    baseline = next(row for row in spec.profiles if row[0] == "Baseline")
+    baseline[2] = None  # users blank, throughput still set
+
+    workbook = write_workbook(tmp_path / "spec.xlsx", spec)
+    exit_code = main(["parse", str(workbook), "--out", str(tmp_path / "ir")])
+
+    assert exit_code == 1
+    stderr = capsys.readouterr().err
+    assert "load_profiles.baseline.users" in stderr
+    assert "Concurrent users" in stderr
+
+
+def test_missing_token_expression_does_not_block_parsing(tmp_path, capsys):
+    """The probe supplies it next; blocking here would make every OAuth spec unparseable."""
+    workbook = write_workbook(tmp_path / "spec.xlsx")
+    assert main(["parse", str(workbook), "--out", str(tmp_path / "ir")]) == 0
+    assert "auth.token_extract.expr" in capsys.readouterr().err
+
+
+def test_parsed_ir_is_not_yet_emittable_without_a_probe(tmp_path):
+    """Parse succeeds, but emit blocks on the same field - the stages disagree on purpose."""
+    workbook = write_workbook(tmp_path / "spec.xlsx")
+    main(["parse", str(workbook), "--out", str(tmp_path / "ir")])
+
+    ir_path = tmp_path / "ir" / "claims_intake_service.yaml"
+    assert main(["emit", str(ir_path), "--out", str(tmp_path / "out")]) == 1

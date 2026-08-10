@@ -1,0 +1,692 @@
+"""Specification workbook -> Test Plan IR.
+
+Two rules govern everything here.
+
+**Never invent a value.** A field that is missing, blank or unrecognised becomes a `gaps` entry.
+An invented thread count or a guessed auth type produces a script that runs, validates, and
+measures the wrong thing - which is worse than no script, because it looks like an answer.
+
+**Never raise on the first problem.** A user with six blank cells should be told about six blank
+cells once, not made to run the tool six times. Parsing collects and continues; the caller decides
+what to do about blocking gaps.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+
+from openpyxl import load_workbook
+
+from perfgen.ir.models import (
+    Application,
+    Auth,
+    AuthStrategy,
+    AuthType,
+    Flow,
+    Gap,
+    LoadProfile,
+    ProbeProvenance,
+    ProfileId,
+    Provenance,
+    Severity,
+    Sla,
+    Step,
+    TestPlanIR,
+    Throughput,
+    TokenExtract,
+    TokenRequest,
+)
+from perfgen.parse import values
+from perfgen.parse.sheets import (
+    LabelledSheet,
+    cell_text,
+    find_header_row,
+    find_sheet,
+    iter_data_rows,
+)
+from perfgen.parse.values import (
+    ACCOUNT_MODELS,
+    AUTH_TYPES,
+    METHODS,
+    PROFILE_IDS,
+    SLA_METRICS,
+    SLA_UNITS,
+    THROUGHPUT_UNITS,
+)
+
+APPLICATION_SHEET = ("Application",)
+FLOWS_SHEET = ("Flows", "Flow")
+STEPS_SHEET = ("Flow steps", "Flow Steps", "Steps")
+PROFILES_SHEET = ("Load profiles", "Load Profiles", "Load profile")
+SLA_SHEET = ("SLA", "SLAs", "Service levels")
+
+DEFAULT_TOKEN_VAR = "authToken"
+
+# Every profile the template ships, so a missing row can be reported by name.
+EXPECTED_PROFILES = ["Baseline", "Peak load", "Capacity / overload", "Endurance"]
+
+
+@dataclass
+class ParseResult:
+    ir: TestPlanIR | None
+    gaps: list[Gap] = field(default_factory=list)
+
+    @property
+    def blocking(self) -> list[Gap]:
+        return [g for g in self.gaps if g.severity is Severity.BLOCKING]
+
+    @property
+    def ok(self) -> bool:
+        return self.ir is not None and not self.blocking
+
+
+class _Collector:
+    """Accumulates gaps while parsing, so nothing raises until the caller decides."""
+
+    def __init__(self) -> None:
+        self.gaps: list[Gap] = []
+
+    def blocking(self, field_path: str, message: str) -> None:
+        self.gaps.append(Gap(field=field_path, severity=Severity.BLOCKING, message=message))
+
+    def warning(self, field_path: str, message: str) -> None:
+        self.gaps.append(Gap(field=field_path, severity=Severity.WARNING, message=message))
+
+    def missing_sheet(self, name: str) -> None:
+        self.blocking(
+            f"sheet.{name}",
+            f"The workbook has no '{name}' sheet. It is one of the five sheets the "
+            f"specification template ships with.",
+        )
+
+
+def parse_workbook(path: str | Path) -> ParseResult:
+    """Read a specification workbook and build the IR, collecting every gap on the way."""
+    source = Path(path)
+    collector = _Collector()
+    workbook = load_workbook(source, data_only=True, read_only=False)
+
+    application, auth = _parse_application(workbook, collector)
+    flows = _parse_flows(workbook, collector)
+    profiles = _parse_profiles(workbook, collector)
+    slas = _parse_sla(workbook, collector)
+
+    if application is None:
+        return ParseResult(ir=None, gaps=collector.gaps)
+
+    provenance = Provenance(
+        source_workbook=source.name,
+        generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        probe=ProbeProvenance(),
+    )
+
+    try:
+        ir = TestPlanIR(
+            application=application,
+            auth=auth,
+            flows=flows,
+            load_profiles=profiles,
+            sla=slas,
+            gaps=collector.gaps,
+            provenance=provenance,
+        )
+    except ValueError as exc:
+        collector.blocking(
+            "ir",
+            f"The spec could not be assembled into a valid test plan: {exc}",
+        )
+        return ParseResult(ir=None, gaps=collector.gaps)
+
+    # refresh_required is derived during validation, so any warning about it is added afterwards.
+    ir.gaps = collector.gaps
+    return ParseResult(ir=ir, gaps=collector.gaps)
+
+
+# --------------------------------------------------------------------------------------------
+# Application + auth
+# --------------------------------------------------------------------------------------------
+
+
+def _parse_application(workbook, collector: _Collector) -> tuple[Application | None, Auth]:
+    fallback_auth = Auth(type=AuthType.NONE)
+    sheet = find_sheet(workbook, *APPLICATION_SHEET)
+    if sheet is None:
+        collector.missing_sheet("Application")
+        return None, fallback_auth
+
+    header = find_header_row(sheet, ["Attribute", "Value"])
+    if header is None or not header.has("Value"):
+        collector.blocking(
+            "application",
+            "The 'Application' sheet has no 'Value' column header. Values are read from the "
+            "column headed 'Value' - the 'Example' column is guidance only and is never used.",
+        )
+        return None, fallback_auth
+
+    labelled = LabelledSheet(sheet, header)
+
+    def required(label: str, field_path: str) -> str | None:
+        value = cell_text(labelled.get(label))
+        if value is None:
+            location = _where("Application", labelled.row_of(label))
+            reason = (
+                "is empty" if labelled.has_label(label) else "is missing from the sheet"
+            )
+            collector.blocking(field_path, f"{location}: '{label}' {reason}.")
+        return value
+
+    name = required("Application name", "application.name")
+    base_url = required("Base URL", "application.base_url")
+
+    if base_url is not None and not base_url.lower().startswith(("http://", "https://")):
+        collector.blocking(
+            "application.base_url",
+            f"{_where('Application', labelled.row_of('Base URL'))}: 'Base URL' is "
+            f"{base_url!r}, which has no http:// or https:// scheme.",
+        )
+        base_url = None
+
+    auth = _parse_auth(labelled, collector)
+
+    if name is None or base_url is None:
+        return None, auth
+
+    application = Application(
+        name=name,
+        base_url=base_url.rstrip("/"),
+        base_path=_normalise_base_path(cell_text(labelled.get("Base path"))),
+        api_reference=cell_text(labelled.get("API reference location")),
+    )
+    return application, auth
+
+
+def _normalise_base_path(value: str | None) -> str | None:
+    if value is None:
+        return None
+    path = value.strip().rstrip("/")
+    if not path:
+        return None
+    return path if path.startswith("/") else f"/{path}"
+
+
+def _parse_auth(labelled: LabelledSheet, collector: _Collector) -> Auth:
+    raw_type = labelled.get("Auth type")
+    auth_type = values.lookup(AUTH_TYPES, raw_type)
+
+    if auth_type is None:
+        if cell_text(raw_type) is None:
+            collector.blocking(
+                "auth.type",
+                f"{_where('Application', labelled.row_of('Auth type'))}: 'Auth type' is empty. "
+                f"Choose one of: {', '.join(sorted(AUTH_TYPES))}.",
+            )
+        else:
+            collector.blocking(
+                "auth.type",
+                f"{_where('Application', labelled.row_of('Auth type'))}: 'Auth type' is "
+                f"{cell_text(raw_type)!r}, which is not a recognised value. Choose one of: "
+                f"{', '.join(sorted(AUTH_TYPES))}.",
+            )
+        return Auth(type=AuthType.NONE)
+
+    raw_model = labelled.get("Account model")
+    strategy = values.lookup(ACCOUNT_MODELS, raw_model)
+    if strategy is None and auth_type is not AuthType.NONE:
+        collector.blocking(
+            "auth.strategy",
+            f"{_where('Application', labelled.row_of('Account model'))}: 'Account model' is "
+            f"{cell_text(raw_model)!r}. Use 'Single shared' or 'One per user'.",
+        )
+        strategy = AuthStrategy.SHARED_SETUP
+
+    if auth_type is AuthType.NONE:
+        return Auth(type=AuthType.NONE, strategy=strategy or AuthStrategy.SHARED_SETUP)
+
+    header_name = cell_text(labelled.get("Auth header name"))
+    value_format = cell_text(labelled.get("Auth header value format"))
+    for label, value, path in (
+        ("Auth header name", header_name, "auth.header_name"),
+        ("Auth header value format", value_format, "auth.value_format"),
+    ):
+        if value is None:
+            collector.blocking(
+                path,
+                f"{_where('Application', labelled.row_of(label))}: '{label}' is required when "
+                f"an authentication type is set.",
+            )
+
+    if value_format is not None and "{token}" not in value_format:
+        collector.warning(
+            "auth.value_format",
+            f"{_where('Application', labelled.row_of('Auth header value format'))}: "
+            f"'Auth header value format' is {value_format!r} and contains no {{token}} "
+            f"placeholder, so the token will not be substituted into the header.",
+        )
+
+    token_request = None
+    token_extract = None
+    if auth_type.needs_token_request:
+        token_request = _parse_token_request(labelled, collector)
+        # The expression is discovered by the probe (M3); until then it is unknown, not invented.
+        token_extract = TokenExtract(var=DEFAULT_TOKEN_VAR)
+
+    lifetime = values.as_int(labelled.get("Token lifetime (seconds)"))
+    if lifetime is None and cell_text(labelled.get("Token lifetime (seconds)")) is not None:
+        collector.warning(
+            "auth.lifetime_seconds",
+            f"{_where('Application', labelled.row_of('Token lifetime (seconds)'))}: "
+            f"'Token lifetime (seconds)' is not a whole number of seconds.",
+        )
+
+    try:
+        return Auth(
+            type=auth_type,
+            strategy=strategy or AuthStrategy.SHARED_SETUP,
+            token_request=token_request,
+            token_extract=token_extract,
+            lifetime_seconds=lifetime,
+            header_name=header_name,
+            value_format=value_format,
+        )
+    except ValueError:
+        # Required auth fields are already reported above; fall back so parsing can continue.
+        return Auth(type=AuthType.NONE)
+
+
+def _parse_token_request(labelled: LabelledSheet, collector: _Collector) -> TokenRequest | None:
+    url = cell_text(labelled.get("Token endpoint URL"))
+    if url is None:
+        collector.blocking(
+            "auth.token_request.url",
+            f"{_where('Application', labelled.row_of('Token endpoint URL'))}: "
+            f"'Token endpoint URL' is required for an OAuth2 flow.",
+        )
+        return None
+
+    method = cell_text(labelled.get("Token request method")) or "POST"
+    if values.lookup(METHODS, method) is None:
+        collector.warning(
+            "auth.token_request.method",
+            f"{_where('Application', labelled.row_of('Token request method'))}: "
+            f"'Token request method' is {method!r}; expected POST or GET.",
+        )
+
+    param_names = values.as_lines(labelled.get("Token request parameters"))
+    if not param_names:
+        collector.warning(
+            "auth.token_request.param_names",
+            f"{_where('Application', labelled.row_of('Token request parameters'))}: "
+            f"'Token request parameters' is empty, so the token request will have no body.",
+        )
+
+    credential_refs = values.as_lines(labelled.get("Credential reference names"))
+    if not credential_refs:
+        collector.warning(
+            "auth.token_request.credential_refs",
+            f"{_where('Application', labelled.row_of('Credential reference names'))}: "
+            f"'Credential reference names' is empty. The generated script will read every token "
+            f"parameter from an environment variable named after the parameter itself.",
+        )
+
+    return TokenRequest(
+        method=method.upper(),
+        url=url,
+        content_type=cell_text(labelled.get("Token request content type"))
+        or "application/x-www-form-urlencoded",
+        param_names=param_names,
+        credential_refs=credential_refs,
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# Flows and steps
+# --------------------------------------------------------------------------------------------
+
+
+def _parse_flows(workbook, collector: _Collector) -> list[Flow]:
+    sheet = find_sheet(workbook, *FLOWS_SHEET)
+    if sheet is None:
+        collector.missing_sheet("Flows")
+        return []
+
+    header = find_header_row(sheet, ["Flow ID", "Flow name", "Share of load %"])
+    id_column = header.column_of("Flow ID") if header else None
+    if header is None or id_column is None:
+        collector.blocking(
+            "flows",
+            "The 'Flows' sheet has no 'Flow ID' column header, so its rows cannot be read.",
+        )
+        return []
+
+    steps_by_flow = _parse_steps(workbook, collector)
+
+    flows: list[Flow] = []
+    seen: set[str] = set()
+    for row_index, cells in iter_data_rows(sheet, header, key_column=id_column):
+        flow_id = cell_text(cells.get(id_column))
+        assert flow_id is not None
+        location = _where("Flows", row_index)
+
+        if flow_id in seen:
+            collector.blocking(
+                f"flows.{flow_id}",
+                f"{location}: Flow ID {flow_id!r} appears more than once.",
+            )
+            continue
+        seen.add(flow_id)
+
+        name = _column_text(cells, header, "Flow name") or flow_id
+        share = values.as_int(_column_value(cells, header, "Share of load %"))
+        if share is None:
+            collector.blocking(
+                f"flows.{flow_id}.share_pct",
+                f"{location}: 'Share of load %' is empty or not a whole number for {flow_id}.",
+            )
+            continue
+
+        think_seconds = _column_value(cells, header, "Think time between calls (s)")
+        think_ms = values.seconds_to_ms(think_seconds)
+        if think_ms is None:
+            think_ms = 0
+            collector.warning(
+                f"flows.{flow_id}.think_time_ms",
+                f"{location}: 'Think time between calls (s)' is empty for {flow_id}; "
+                f"the script will send requests back to back.",
+            )
+
+        probe_safe = values.as_bool(
+            _column_value(cells, header, "Safe to run against this environment")
+        )
+        if probe_safe is None:
+            probe_safe = False
+            collector.warning(
+                f"flows.{flow_id}.probe_safe",
+                f"{location}: 'Safe to run against this environment' is not Yes or No for "
+                f"{flow_id}; treating it as No, so this flow will not be called during the probe.",
+            )
+
+        steps = steps_by_flow.get(flow_id, [])
+        if not steps:
+            collector.blocking(
+                f"flows.{flow_id}.steps",
+                f"{location}: flow {flow_id} has no rows on the 'Flow steps' sheet.",
+            )
+            continue
+
+        flows.append(
+            Flow(
+                id=flow_id,
+                name=name,
+                share_pct=min(share, 100),
+                think_time_ms=think_ms,
+                probe_safe=probe_safe,
+                steps=steps,
+            )
+        )
+
+    orphaned = set(steps_by_flow) - seen
+    for flow_id in sorted(orphaned):
+        collector.warning(
+            f"flows.{flow_id}",
+            f"The 'Flow steps' sheet has rows for flow {flow_id!r}, but there is no such Flow ID "
+            f"on the 'Flows' sheet. Those steps are ignored.",
+        )
+
+    if not flows:
+        collector.blocking(
+            "flows",
+            "No usable flows were found on the 'Flows' sheet. At least one is needed.",
+        )
+    return flows
+
+
+def _parse_steps(workbook, collector: _Collector) -> dict[str, list[Step]]:
+    sheet = find_sheet(workbook, *STEPS_SHEET)
+    if sheet is None:
+        collector.missing_sheet("Flow steps")
+        return {}
+
+    header = find_header_row(sheet, ["Flow ID", "Step no", "Endpoint path"])
+    id_column = header.column_of("Flow ID") if header else None
+    if header is None or id_column is None:
+        collector.blocking(
+            "flows.steps",
+            "The 'Flow steps' sheet has no 'Flow ID' column header, so its rows cannot be read.",
+        )
+        return {}
+
+    collected: dict[str, list[tuple[int, Step]]] = {}
+    for row_index, cells in iter_data_rows(sheet, header, key_column=id_column):
+        flow_id = cell_text(cells.get(id_column))
+        assert flow_id is not None
+        location = _where("Flow steps", row_index)
+
+        path = _column_text(cells, header, "Endpoint path")
+        if path is None:
+            collector.blocking(
+                f"flows.{flow_id}.steps.path",
+                f"{location}: 'Endpoint path' is empty.",
+            )
+            continue
+
+        step_no = values.as_int(_column_value(cells, header, "Step no"))
+        if step_no is None or step_no < 1:
+            collector.blocking(
+                f"flows.{flow_id}.steps.index",
+                f"{location}: 'Step no' is empty or not a positive whole number.",
+            )
+            continue
+
+        raw_method = _column_text(cells, header, "Method")
+        method = values.lookup(METHODS, raw_method)
+        if method is None:
+            collector.blocking(
+                f"flows.{flow_id}.steps.method",
+                f"{location}: 'Method' is {raw_method!r}; expected one of "
+                f"{', '.join(m.value for m in METHODS.values())}.",
+            )
+            continue
+
+        expected_status = values.as_int(_column_value(cells, header, "Expected status"))
+        if expected_status is None:
+            expected_status = 200
+            collector.warning(
+                f"flows.{flow_id}.steps.expected_status",
+                f"{location}: 'Expected status' is empty; the script will assert 200.",
+            )
+
+        body = _column_text(cells, header, "Request body or parameters")
+        step = Step(
+            index=step_no,
+            name=_column_text(cells, header, "Step name") or f"{flow_id} step {step_no}",
+            method=method,
+            path=path if path.startswith("/") else f"/{path}",
+            body=body,
+            content_type=values.infer_content_type(body),
+            expected_status=expected_status,
+        )
+        collected.setdefault(flow_id, []).append((row_index, step))
+
+    result: dict[str, list[Step]] = {}
+    for flow_id, entries in collected.items():
+        indices = [step.index for _, step in entries]
+        duplicates = sorted({i for i in indices if indices.count(i) > 1})
+        if duplicates:
+            collector.blocking(
+                f"flows.{flow_id}.steps.index",
+                f"Flow steps: flow {flow_id} uses step number {duplicates} more than once. "
+                f"Step numbers set the order, so they must be unique within a flow.",
+            )
+            continue
+        # Steps run in the order numbered, whatever order the rows happen to be in.
+        result[flow_id] = [step for _, step in sorted(entries, key=lambda e: e[1].index)]
+    return result
+
+
+# --------------------------------------------------------------------------------------------
+# Load profiles and SLA
+# --------------------------------------------------------------------------------------------
+
+
+def _parse_profiles(workbook, collector: _Collector) -> list[LoadProfile]:
+    sheet = find_sheet(workbook, *PROFILES_SHEET)
+    if sheet is None:
+        collector.missing_sheet("Load profiles")
+        return []
+
+    header = find_header_row(sheet, ["Test type", "Required", "Concurrent users"])
+    type_column = header.column_of("Test type") if header else None
+    if header is None or type_column is None:
+        collector.blocking(
+            "load_profiles",
+            "The 'Load profiles' sheet has no 'Test type' column header.",
+        )
+        return []
+
+    profiles: list[LoadProfile] = []
+    seen: set[ProfileId] = set()
+    for row_index, cells in iter_data_rows(sheet, header, key_column=type_column):
+        raw_type = cell_text(cells.get(type_column))
+        profile_id = values.lookup(PROFILE_IDS, raw_type)
+        location = _where("Load profiles", row_index)
+
+        if profile_id is None:
+            collector.warning(
+                "load_profiles",
+                f"{location}: test type {raw_type!r} is not one of "
+                f"{', '.join(EXPECTED_PROFILES)}; the row is ignored.",
+            )
+            continue
+        if profile_id in seen:
+            collector.warning(
+                f"load_profiles.{profile_id.value}",
+                f"{location}: test type {raw_type!r} appears more than once; "
+                f"only the first row is used.",
+            )
+            continue
+        seen.add(profile_id)
+
+        enabled = values.as_bool(_column_value(cells, header, "Required"))
+        if enabled is None:
+            enabled = False
+
+        throughput = _parse_throughput(cells, header, profile_id, location, collector)
+
+        profiles.append(
+            LoadProfile(
+                id=profile_id,
+                enabled=enabled,
+                users=values.as_int(_column_value(cells, header, "Concurrent users")),
+                ramp_up_s=values.as_int(_column_value(cells, header, "Ramp-up (s)")),
+                duration_s=values.minutes_to_seconds(
+                    _column_value(cells, header, "Duration (min)")
+                ),
+                throughput=throughput,
+            )
+        )
+
+    if not profiles:
+        collector.blocking(
+            "load_profiles",
+            "The 'Load profiles' sheet has no recognisable test type rows.",
+        )
+    return profiles
+
+
+def _parse_throughput(cells, header, profile_id, location, collector) -> Throughput | None:
+    raw_value = _column_value(cells, header, "Target throughput")
+    amount = values.as_float(raw_value)
+    raw_unit = _column_text(cells, header, "Throughput unit")
+    unit = values.lookup(THROUGHPUT_UNITS, raw_unit)
+
+    if amount is None:
+        if cell_text(raw_value) is not None:
+            collector.warning(
+                f"load_profiles.{profile_id.value}.throughput",
+                f"{location}: 'Target throughput' is not a number; it is ignored.",
+            )
+        return None
+    if amount <= 0:
+        collector.warning(
+            f"load_profiles.{profile_id.value}.throughput",
+            f"{location}: 'Target throughput' must be greater than zero; it is ignored.",
+        )
+        return None
+    if unit is None:
+        collector.blocking(
+            f"load_profiles.{profile_id.value}.throughput.unit",
+            f"{location}: 'Target throughput' is {amount:g} but 'Throughput unit' is "
+            f"{raw_unit!r}. Use TPS, TPM or TPH - the rate is meaningless without it.",
+        )
+        return None
+    return Throughput(value=amount, unit=unit)
+
+
+def _parse_sla(workbook, collector: _Collector) -> list[Sla]:
+    sheet = find_sheet(workbook, *SLA_SHEET)
+    if sheet is None:
+        collector.warning(
+            "sla",
+            "The workbook has no 'SLA' sheet, so no pass/fail criteria file will be written.",
+        )
+        return []
+
+    header = find_header_row(sheet, ["Applies to", "Metric", "Target"])
+    scope_column = header.column_of("Applies to") if header else None
+    if header is None or scope_column is None:
+        collector.warning("sla", "The 'SLA' sheet has no 'Applies to' column header.")
+        return []
+
+    slas: list[Sla] = []
+    for row_index, cells in iter_data_rows(sheet, header, key_column=scope_column):
+        location = _where("SLA", row_index)
+        scope = values.sla_scope(cells.get(scope_column))
+        metric = values.lookup(SLA_METRICS, _column_text(cells, header, "Metric"))
+        target = values.as_float(_column_value(cells, header, "Target"))
+        unit = values.lookup(SLA_UNITS, _column_text(cells, header, "Unit"))
+
+        if metric is None:
+            collector.warning(
+                "sla.metric",
+                f"{location}: metric {_column_text(cells, header, 'Metric')!r} is not "
+                f"recognised; the row is ignored.",
+            )
+            continue
+        if target is None:
+            collector.warning(
+                "sla.target", f"{location}: 'Target' is empty or not a number; the row is ignored."
+            )
+            continue
+        if unit is None:
+            collector.warning(
+                "sla.unit",
+                f"{location}: unit {_column_text(cells, header, 'Unit')!r} is not recognised; "
+                f"the row is ignored.",
+            )
+            continue
+
+        slas.append(Sla(scope=scope or "all", metric=metric, target=target, unit=unit))
+    return slas
+
+
+# --------------------------------------------------------------------------------------------
+# Small helpers
+# --------------------------------------------------------------------------------------------
+
+
+def _column_value(cells: dict[int, object], header, *names: str):
+    column = header.column_of(*names)
+    return None if column is None else cells.get(column)
+
+
+def _column_text(cells: dict[int, object], header, *names: str) -> str | None:
+    return cell_text(_column_value(cells, header, *names))
+
+
+def _where(sheet_name: str, row_index: int | None) -> str:
+    """Name the cell to fix, not just the field that is wrong."""
+    if row_index is None:
+        return sheet_name
+    return f"{sheet_name}, row {row_index}"

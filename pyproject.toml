@@ -12,10 +12,11 @@ dependencies = [
     "jinja2>=3.1",
     "lxml>=5.0",
     "pyyaml>=6.0",
+    "openpyxl>=3.1",
 ]
 
-# openpyxl (M2), httpx + python-dotenv (M3) and the Claude Agent SDK (M4) are added at the
-# milestone that first needs them, not before.
+# httpx + python-dotenv (M3) and the Claude Agent SDK (M4) are added at the milestone that first
+# needs them, not before.
 
 [project.optional-dependencies]
 dev = [

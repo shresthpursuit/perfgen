@@ -423,7 +423,7 @@ def _flow_thread_group(
         group.add(
             node(
                 "constant_throughput_timer",
-                testname=f"Throughput — {flow.id}",
+                testname=f"Throughput - {flow.id}",
                 throughput_per_minute=naming.prop_ref(naming.throughput_prop(flow.id), default),
             )
         )
@@ -451,7 +451,7 @@ def build_tree(ir: TestPlanIR, jmeter_version: str) -> tuple[bytes, list[str]]:
         if count == 0:
             warnings.append(
                 f"Flow {flow_id} is apportioned 0 threads at the {baseline.profile.id.value} "
-                f"profile's {baseline.profile.users} users — it will not run. Raise the user "
+                f"profile's {baseline.profile.users} users - it will not run. Raise the user "
                 f"count or the flow's share of load."
             )
 

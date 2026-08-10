@@ -18,16 +18,20 @@ _PROFILE_ROW: dict[ProfileId, tuple[int, str]] = {
 }
 
 
-def detect_gaps(ir: TestPlanIR) -> list[Gap]:
+def detect_gaps(ir: TestPlanIR, *, pre_probe: bool = False) -> list[Gap]:
     """Return gaps implied by the IR's own contents.
 
-    These are structural gaps the emitter cares about. The workbook parser (M2) adds its own for
-    labels it could not find, and both end up in the same `gaps` list.
+    These are structural gaps the emitter cares about. The workbook parser adds its own for labels
+    it could not find, and both end up in the same `gaps` list.
+
+    `pre_probe` marks the stage: straight after parsing, a token extractor with no expression is
+    expected - the probe determines it next - so it is a note rather than a blocker. By emit time
+    the same hole means the script cannot read a token at all.
     """
     gaps: list[Gap] = []
     gaps.extend(_load_profile_gaps(ir))
     gaps.extend(_flow_gaps(ir))
-    gaps.extend(_auth_gaps(ir))
+    gaps.extend(_auth_gaps(ir, pre_probe=pre_probe))
     return gaps
 
 
@@ -52,7 +56,7 @@ def _load_profile_gaps(ir: TestPlanIR) -> list[Gap]:
                     severity=Severity.BLOCKING,
                     message=(
                         f"Load profiles, row {row} ({label}): 'Concurrent users' is empty and "
-                        f"{detail}. Fill it in — the framework will not choose a number for you."
+                        f"{detail}. Fill it in - the framework will not choose a number for you."
                     ),
                 )
             )
@@ -120,7 +124,7 @@ def _flow_gaps(ir: TestPlanIR) -> list[Gap]:
     return gaps
 
 
-def _auth_gaps(ir: TestPlanIR) -> list[Gap]:
+def _auth_gaps(ir: TestPlanIR, *, pre_probe: bool = False) -> list[Gap]:
     gaps: list[Gap] = []
     if ir.auth.refresh_required:
         gaps.append(
@@ -138,10 +142,13 @@ def _auth_gaps(ir: TestPlanIR) -> list[Gap]:
         gaps.append(
             Gap(
                 field="auth.token_extract.expr",
-                severity=Severity.BLOCKING,
+                severity=Severity.WARNING if pre_probe else Severity.BLOCKING,
                 message=(
-                    "The token extractor has no expression. The probe determines it; until then "
-                    "the generated script cannot read a token out of the auth response."
+                    "The token extractor has no expression yet. The probe determines it by "
+                    "calling the token endpoint and looking at the response."
+                    if pre_probe
+                    else "The token extractor has no expression, so the generated script cannot "
+                    "read a token out of the auth response. Run the probe first."
                 ),
             )
         )
