@@ -11,11 +11,14 @@ import contextlib
 import sys
 from pathlib import Path
 
+from perfgen import secrets
 from perfgen.emit import emit
 from perfgen.emit.naming import slug
 from perfgen.ir.gaps import blocking, detect_gaps, format_gaps
 from perfgen.ir.io import dump_ir, load_ir
 from perfgen.parse import parse_workbook
+from perfgen.probe import apply_outcome, dump_record, run_probe
+from perfgen.probe.runner import DEFAULT_TIMEOUT_S
 from perfgen.validate import validate_file
 
 
@@ -49,6 +52,18 @@ def main(argv: list[str] | None = None) -> int:
         help="directory for the generated IR YAML (default: data/ir)",
     )
 
+    probe_cmd = sub.add_parser("probe", help="run the spec once and record the traffic")
+    probe_cmd.add_argument("ir", type=Path, help="path to a Test Plan IR YAML file")
+    probe_cmd.add_argument(
+        "--out",
+        type=Path,
+        default=Path("data/probe"),
+        help="directory for the traffic record (default: data/probe)",
+    )
+    probe_cmd.add_argument(
+        "--timeout", type=int, default=DEFAULT_TIMEOUT_S, help="per-request timeout in seconds"
+    )
+
     emit_cmd = sub.add_parser("emit", help="IR YAML -> .jmx")
     emit_cmd.add_argument("ir", type=Path, help="path to a Test Plan IR YAML file")
     emit_cmd.add_argument(
@@ -59,9 +74,51 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "parse":
         return _parse(args.workbook, args.out)
+    if args.command == "probe":
+        return _probe(args.ir, args.out, args.timeout)
     if args.command == "emit":
         return _emit(args.ir, args.out, args.jmeter_version)
     return 2  # pragma: no cover - argparse enforces the choices
+
+
+def _probe(ir_path: Path, out_dir: Path, timeout_s: int) -> int:
+    secrets.load_dotenv()
+    ir = load_ir(ir_path)
+
+    outcome = run_probe(ir, timeout_s=timeout_s)
+    record_path = dump_record(outcome.record, Path(out_dir) / f"{slug(ir.application.name)}.json")
+
+    apply_outcome(ir, outcome)
+    dump_ir(ir, ir_path)  # the IR accumulates through the stages, so it is updated in place
+
+    print(f"Recorded {record_path}")
+    print(f"Updated  {ir_path}")
+
+    observed = outcome.record.steps_observed
+    print(
+        f"\n{observed} step(s) observed, "
+        f"{len(outcome.record.skipped_flows)} flow(s) skipped."
+    )
+    if outcome.token_expr:
+        print(f"Token found at {outcome.token_expr} (confidence: {outcome.token_confidence.value})")
+
+    if outcome.warnings:
+        print("\nWarnings:")
+        for warning in outcome.warnings:
+            print(f"  ! {warning}")
+
+    if outcome.degraded:
+        print(
+            "\nDEGRADED RUN. Every correlation will be inferred from placeholder names rather "
+            "than observed traffic. Review the generated script before trusting it."
+        )
+        return 1
+
+    print(
+        "\nThe traffic record holds real response bodies and is written to a gitignored "
+        "directory. Credentials and the auth token are redacted; response bodies are not."
+    )
+    return 0
 
 
 def _parse(workbook_path: Path, out_dir: Path) -> int:

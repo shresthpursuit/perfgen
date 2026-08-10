@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from urllib.parse import urlsplit
 
+from perfgen.secrets import env_var_name
+
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
@@ -74,8 +76,14 @@ def split_url(url: str) -> tuple[str, str, str, str]:
 
 
 def env_var(reference_name: str) -> str:
-    """`perf-client-id` -> `PERF_CLIENT_ID`, per the brief's secrets resolution rule."""
-    return _NON_ALNUM.sub("_", reference_name.strip().lower()).strip("_").upper()
+    """`perf-client-id` -> `PERF_CLIENT_ID`, per the brief's secrets resolution rule.
+
+    Re-exported from `perfgen.secrets` rather than reimplemented: the script the emitter writes
+    and the lookup the probe performs must name the same variable, and two copies of this rule
+    would eventually disagree - the probe passing while the generated script failed to
+    authenticate, with nothing in either output to explain why.
+    """
+    return env_var_name(reference_name)
 
 
 def env_lookup(reference_name: str) -> str:
@@ -92,23 +100,45 @@ def env_lookup(reference_name: str) -> str:
     return f"${{__groovy(System.getenv('{env_var(reference_name)}'))}}"
 
 
+def _normalise_ref(name: str) -> str:
+    return _NON_ALNUM.sub("_", name.strip().lower()).strip("_")
+
+
 def match_credential_ref(param_name: str, credential_refs: list[str]) -> str | None:
     """Find the credential reference that supplies a token request parameter.
 
     The IR lists parameter names and credential reference names as two independent lists with no
-    mapping between them, so the emitter matches by name: a reference supplies a parameter when its
-    normalised form equals the parameter, or ends with `_<parameter>`. `perf-client-secret` thus
-    supplies `client_secret`, while `grant_type` matches nothing and is not a secret.
+    mapping between them, so which secret fills which parameter has to be matched by name. Three
+    tiers, most specific first:
 
-    Deterministic: candidates are sorted, and the shortest (most specific) match wins.
+    1. the normalised names are equal;
+    2. the reference ends with `_<parameter>` - `perf-client-secret` supplies `client_secret`;
+    3. their final words agree - `claims-perf-id` supplies `client_id`, which tier 2 misses
+       because real reference names are usually prefixed by system rather than by parameter.
+
+    A tier that produces more than one candidate is ambiguous, and an ambiguous credential is not
+    guessed at: the caller is told there is no match and says so. `grant_type` matches nothing at
+    any tier, which is correct - it is a protocol constant, not a secret.
     """
-    target = _NON_ALNUM.sub("_", param_name.strip().lower()).strip("_")
-    candidates = [
-        ref
-        for ref in credential_refs
-        if (norm := _NON_ALNUM.sub("_", ref.strip().lower()).strip("_")) == target
-        or norm.endswith(f"_{target}")
-    ]
-    if not candidates:
+    target = _normalise_ref(param_name)
+    if not target:
         return None
-    return sorted(candidates, key=lambda r: (len(r), r))[0]
+    normalised = {ref: _normalise_ref(ref) for ref in credential_refs}
+
+    tiers = (
+        [ref for ref, norm in normalised.items() if norm == target],
+        [ref for ref, norm in normalised.items() if norm.endswith(f"_{target}")],
+        [
+            ref
+            for ref, norm in normalised.items()
+            if norm.rsplit("_", 1)[-1] == target.rsplit("_", 1)[-1]
+        ],
+    )
+
+    for candidates in tiers:
+        unique = sorted(set(candidates))
+        if len(unique) == 1:
+            return unique[0]
+        if len(unique) > 1:
+            return None  # ambiguous: two references could supply this parameter
+    return None
