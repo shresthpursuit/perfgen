@@ -1,0 +1,8 @@
+{# calcMode 2 = "all active threads in current thread group", which is what we want given one
+   thread group per flow. throughput is a stringProp rather than a doubleProp so it can hold a
+   ${__P(...)} reference and stay profile-switchable (D1); JMeter resolves the function before
+   coercing to double. The value is in samples per MINUTE. #}
+<ConstantThroughputTimer guiclass="TestBeanGUI" testclass="ConstantThroughputTimer" testname="{{ testname }}" enabled="true">
+  <intProp name="calcMode">2</intProp>
+  <stringProp name="throughput">{{ throughput_per_minute }}</stringProp>
+</ConstantThroughputTimer>

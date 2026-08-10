@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "perfgen"
+version = "0.1.0"
+description = "Reads a filled-in Excel API specification and emits a runnable Apache JMeter .jmx"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6",
+    "jinja2>=3.1",
+    "lxml>=5.0",
+    "pyyaml>=6.0",
+]
+
+# openpyxl (M2), httpx + python-dotenv (M3) and the Claude Agent SDK (M4) are added at the
+# milestone that first needs them, not before.
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+perfgen = "perfgen.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["perfgen*"]
+
+[tool.setuptools.package-data]
+perfgen = ["emit/templates/*.j2"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Tests are plain functions. Without this, pytest tries to collect the TestPlanIR model as a
+# test class because of its name.
+python_classes = []

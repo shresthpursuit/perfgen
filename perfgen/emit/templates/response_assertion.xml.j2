@@ -1,0 +1,11 @@
+{# "Asserion.test_strings" is misspelled in JMeter itself — the name must match or the assertion
+   loads empty. test_type 8 is EQUALS; the inner stringProp name is Java's String.hashCode(). #}
+<ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="{{ testname }}" enabled="true">
+  <collectionProp name="Asserion.test_strings">
+    <stringProp name="{{ hash_code }}">{{ expected }}</stringProp>
+  </collectionProp>
+  <stringProp name="Assertion.custom_message">{{ custom_message }}</stringProp>
+  <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+  <boolProp name="Assertion.assume_success">false</boolProp>
+  <intProp name="Assertion.test_type">8</intProp>
+</ResponseAssertion>

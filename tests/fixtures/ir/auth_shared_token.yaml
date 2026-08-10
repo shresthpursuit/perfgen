@@ -1,0 +1,130 @@
+# Hand-written IR fixture: a shared auth token (global scope, setUp thread group) plus an
+# iteration-scoped extract feeding a {placeholder} in a later step's path.
+#
+# This exercises the two scope emissions that differ:
+#   authToken  global    -> JSR223 props.put, read back as ${__P(authToken)}
+#   itemId     iteration -> ordinary ${itemId}
+# and two flows, so thread apportionment by share_pct is non-trivial.
+spec_version: 1
+
+application:
+  name: Order management
+  base_url: https://perf-api.example.internal
+  base_path: /api/v2
+  api_reference: https://perf-api.example.internal/swagger.json
+
+auth:
+  type: oauth2_client_credentials
+  strategy: shared_setup
+  token_request:
+    method: POST
+    url: https://auth.example.internal/oauth2/token
+    content_type: application/x-www-form-urlencoded
+    param_names:
+      - grant_type
+      - client_id
+      - client_secret
+    credential_refs:
+      - perf-client-id
+      - perf-client-secret
+  token_extract:
+    var: authToken
+    source: response_body
+    expr: $.access_token
+    confidence: verified
+  lifetime_seconds: 3600
+  header_name: Authorization
+  value_format: Bearer {token}
+
+flows:
+  - id: F01
+    name: Search and view record
+    share_pct: 60
+    think_time_ms: 3000
+    probe_safe: true
+    steps:
+      - index: 1
+        name: Search catalogue
+        method: GET
+        path: /catalogue/search?q=widget
+        expected_status: 200
+        extracts:
+          - var: itemId
+            source: response_body
+            extractor: json_path
+            expr: $.results[0].id
+            scope: iteration
+            confidence: verified
+            evidence: >-
+              The id returned by the search response was sent back verbatim in the path of the
+              next request during the probe run.
+            used_by:
+              - F01.2.path
+      - index: 2
+        name: Open record detail
+        method: GET
+        path: /catalogue/items/{itemId}
+        expected_status: 200
+
+  - id: F02
+    name: Submit new request
+    share_pct: 40
+    think_time_ms: 5000
+    probe_safe: false
+    steps:
+      - index: 1
+        name: Create request
+        method: POST
+        path: /requests
+        body: '{"type":"standard","subject":"Load test"}'
+        content_type: application/json
+        expected_status: 201
+
+load_profiles:
+  - id: baseline
+    enabled: true
+    users: 25
+    ramp_up_s: 120
+    duration_s: 1800
+    throughput:
+      value: 1200
+      unit: tph
+  - id: peak
+    enabled: true
+    users: 80
+    ramp_up_s: 180
+    duration_s: 1800
+    throughput:
+      value: 4000
+      unit: tph
+  - id: capacity
+    enabled: false
+  - id: endurance
+    enabled: false
+
+sla:
+  - scope: all
+    metric: response_time_p95
+    target: 800
+    unit: ms
+  - scope: F01
+    metric: response_time_p99
+    target: 1500
+    unit: ms
+  - scope: all
+    metric: error_rate
+    target: 1
+    unit: percent
+
+gaps: []
+
+provenance:
+  source_workbook: hand-written-fixture
+  generated_at: '2026-08-10T00:00:00Z'
+  probe:
+    performed: true
+    timestamp: '2026-08-10T00:00:00Z'
+    steps_observed: 2
+    skipped_flows:
+      - F02
+    degraded: false

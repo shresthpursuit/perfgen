@@ -1,0 +1,65 @@
+# Hand-written IR fixture: one flow, no auth, no correlations.
+# The floor case for the emitter — if this does not open and run in JMeter, nothing else will.
+spec_version: 1
+
+application:
+  name: Catalogue browse
+  base_url: https://perf-api.example.internal
+  base_path: /api/v2
+  api_reference: null
+
+auth:
+  type: none
+
+flows:
+  - id: F01
+    name: Browse catalogue
+    share_pct: 100
+    think_time_ms: 2000
+    probe_safe: true
+    steps:
+      - index: 1
+        name: List categories
+        method: GET
+        path: /catalogue/categories
+        expected_status: 200
+      - index: 2
+        name: Search catalogue
+        method: GET
+        path: /catalogue/search?q=widget
+        expected_status: 200
+
+load_profiles:
+  - id: baseline
+    enabled: true
+    users: 10
+    ramp_up_s: 30
+    duration_s: 600
+  - id: peak
+    enabled: false
+  - id: capacity
+    enabled: false
+  - id: endurance
+    enabled: false
+
+sla:
+  - scope: all
+    metric: response_time_p95
+    target: 800
+    unit: ms
+  - scope: all
+    metric: error_rate
+    target: 1
+    unit: percent
+
+gaps: []
+
+provenance:
+  source_workbook: hand-written-fixture
+  generated_at: '2026-08-10T00:00:00Z'
+  probe:
+    performed: false
+    timestamp: null
+    steps_observed: 0
+    skipped_flows: []
+    degraded: false

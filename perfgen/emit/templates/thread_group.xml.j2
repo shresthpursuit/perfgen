@@ -1,0 +1,13 @@
+<ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="{{ testname }}" enabled="true">
+  <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+  <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">
+    <boolProp name="LoopController.continue_forever">false</boolProp>
+    <stringProp name="LoopController.loops">-1</stringProp>
+  </elementProp>
+  <stringProp name="ThreadGroup.num_threads">{{ num_threads }}</stringProp>
+  <stringProp name="ThreadGroup.ramp_time">{{ ramp_time }}</stringProp>
+  <boolProp name="ThreadGroup.scheduler">true</boolProp>
+  <stringProp name="ThreadGroup.duration">{{ duration }}</stringProp>
+  <stringProp name="ThreadGroup.delay">0</stringProp>
+  <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+</ThreadGroup>

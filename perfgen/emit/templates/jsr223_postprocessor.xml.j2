@@ -1,0 +1,9 @@
+{# Publishes a thread-local variable as a JVM-wide property so every thread group can read it
+   via ${__P(name)}. Used for a shared auth token (scope: global). #}
+<JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="{{ testname }}" enabled="true">
+  <stringProp name="cacheKey">true</stringProp>
+  <stringProp name="filename"></stringProp>
+  <stringProp name="parameters"></stringProp>
+  <stringProp name="scriptLanguage">groovy</stringProp>
+  <stringProp name="script">{{ script }}</stringProp>
+</JSR223PostProcessor>

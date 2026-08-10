@@ -1,0 +1,27 @@
+<HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="{{ testname }}" enabled="true">
+  <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+    <collectionProp name="Arguments.arguments">
+      {% if body %}
+      <elementProp name="" elementType="HTTPArgument">
+        <boolProp name="HTTPArgument.always_encode">false</boolProp>
+        <stringProp name="Argument.value">{{ body }}</stringProp>
+        <stringProp name="Argument.metadata">=</stringProp>
+      </elementProp>
+      {% endif %}
+    </collectionProp>
+  </elementProp>
+  <stringProp name="HTTPSampler.domain">{{ domain }}</stringProp>
+  <stringProp name="HTTPSampler.port">{{ port }}</stringProp>
+  <stringProp name="HTTPSampler.protocol">{{ protocol }}</stringProp>
+  <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+  <stringProp name="HTTPSampler.path">{{ path }}</stringProp>
+  <stringProp name="HTTPSampler.method">{{ method }}</stringProp>
+  <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+  <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+  <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+  <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+  <boolProp name="HTTPSampler.postBodyRaw">{{ "true" if body else "false" }}</boolProp>
+  <stringProp name="HTTPSampler.embedded_url_re"></stringProp>
+  <stringProp name="HTTPSampler.connect_timeout">{{ connect_timeout_ms }}</stringProp>
+  <stringProp name="HTTPSampler.response_timeout">{{ response_timeout_ms }}</stringProp>
+</HTTPSamplerProxy>

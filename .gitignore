@@ -1,0 +1,24 @@
+# Secrets — never commit. Present from the first commit, ahead of the M3 dotenv loader.
+.env
+.env.*
+!.env.example
+
+# Generated artifacts
+outputs/
+logs/
+data/probe/
+
+# JMeter run artifacts
+jmeter.log
+*.jtl
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/

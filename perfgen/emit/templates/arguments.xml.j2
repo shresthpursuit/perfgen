@@ -1,0 +1,11 @@
+<Arguments guiclass="ArgumentsPanel" testclass="Arguments" testname="{{ testname }}" enabled="true">
+  <collectionProp name="Arguments.arguments">
+    {% for arg in args %}
+    <elementProp name="{{ arg.name }}" elementType="Argument">
+      <stringProp name="Argument.name">{{ arg.name }}</stringProp>
+      <stringProp name="Argument.value">{{ arg.value }}</stringProp>
+      <stringProp name="Argument.metadata">=</stringProp>
+    </elementProp>
+    {% endfor %}
+  </collectionProp>
+</Arguments>

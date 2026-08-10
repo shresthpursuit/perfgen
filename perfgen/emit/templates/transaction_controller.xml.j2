@@ -1,0 +1,8 @@
+{# D2: includeTimers is written explicitly, never left to the element default. The think-time
+   timer lives inside this controller so it is scoped to one sampler; excluding timers from the
+   sample keeps the delay out of the transaction's elapsed time, so the SLA percentile stays
+   measurable. #}
+<TransactionController guiclass="TransactionControllerGui" testclass="TransactionController" testname="{{ testname }}" enabled="true">
+  <boolProp name="TransactionController.parent">{{ "true" if parent else "false" }}</boolProp>
+  <boolProp name="TransactionController.includeTimers">false</boolProp>
+</TransactionController>

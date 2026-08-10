@@ -43,10 +43,18 @@ git. It is the review surface (an engineer fixes YAML, never generated XML) and 
 
 ## 2. Input: the specification workbook
 
-An `.xlsx` with the sheets below. Header row is row 1 on every sheet. Grey example rows are meant
-to be deleted by the user — tolerate them if left in and skip them.
+Two workbooks ship in `data/specs/`:
 
-**Application** — attribute/value pairs in columns A and B with section divider rows:
+- **`template.xlsx`** — the blank form the user fills in. It contains no example rows.
+- **`sample_filled.xlsx`** — a complete worked example, for reference only. Never submitted.
+
+An `.xlsx` with the sheets below. Header row is row 1 on every sheet.
+
+**Application** — attribute/value pairs with section divider rows. Locate the value by finding the
+label in the `Attribute` column and reading the cell under the `Value` **column header** — the sheet
+also carries `Required`, `Notes` and `Example` columns. **The `Example` column is guidance for the
+user and is never parsed**; on free-text rows it deliberately differs from `Value`, so a parser
+reading the wrong column produces wrong output rather than failing. Fields:
 `Application name`, `Base URL`, `Base path`, `API reference location`, `Auth type`,
 `Token endpoint URL`, `Token request method`, `Token request content type`,
 `Token request parameters` (newline-separated names), `Token lifetime (seconds)`,
@@ -69,8 +77,10 @@ to be deleted by the user — tolerate them if left in and skip them.
 
 **Locate fields by matching label text, never by cell coordinate.** Users insert rows, rename tabs
 and reorder sections. Coordinate-based parsing breaks silently on the second file you receive.
-Match the label string (case-insensitive, whitespace-normalised), read the adjacent cell, and
-record every label you expected but could not find.
+Match the label string (case-insensitive, whitespace-normalised), read the cell in the column whose
+row-1 header is `Value` — not simply the adjacent cell, since `Example` sits on the same row — and
+record every label you expected but could not find. Locate table columns the same way, by header
+text rather than position.
 
 ---
 
@@ -85,6 +95,7 @@ application:
   name: str
   base_url: str                     # scheme + host, no trailing slash
   base_path: str | null
+  api_reference: str | null         # stored only; no behaviour attached
 
 auth:
   type: none | oauth2_client_credentials | oauth2_password | oauth2_pkce
@@ -191,6 +202,12 @@ profile, that is a blocking gap, not an opportunity to assume 50 users. An inven
 produces a script that runs, validates, and measures the wrong thing. Blocking gaps mean a clear
 message and a non-zero exit.
 
+**D3 — concurrency absent on an enabled profile is blocking even when throughput is present.**
+JMeter cannot build a thread group without a thread count, and a Constant Throughput Timer only
+paces threads that already exist; deriving a thread count from a throughput target would be
+inventing a value. The gap message names the sheet and row to fill in, e.g.
+`Load profiles, row 4 (Capacity / overload): Concurrent users`.
+
 ### 4.2 Probe — deterministic
 
 Execute the auth request, then each flow once, single-threaded, in step order, using credentials
@@ -243,7 +260,7 @@ Test Plan
 │   └── Response Assertion (status)
 └── Thread Group per flow             (threads apportioned by share_pct)
     ├── HTTP Header Manager           (auth header + statics)
-    ├── Transaction Controller per step
+    ├── Transaction Controller per step   (includeTimers = false)
     │   ├── HTTP Request
     │   ├── Extractors for that step
     │   ├── Response Assertion
@@ -253,9 +270,25 @@ Test Plan
 
 Emitter rules:
 
-- **All load parameters as JMeter properties**: `${__P(users_baseline,25)}`. One JMX serves all
-  four load profiles, driven by property files. Never emit four near-identical scripts — they
+- **All load parameters as JMeter properties**, named per flow and **never per profile**:
+  `${__P(users_F01,15)}`. One JMX serves all four load profiles, driven by property files — a
+  profile-named property such as `users_baseline` would hardcode one profile into the thread-count
+  field and require editing the JMX to run another. Never emit four near-identical scripts — they
   drift the moment one correlation is fixed.
+- **The emitter writes one `.properties` file per enabled profile** to
+  `outputs/{application_name}/{profile_id}.properties`; inline defaults in the JMX are the baseline
+  profile's values. Run as `jmeter -q baseline.properties -t plan.jmx`.
+- **Apportion per-flow thread counts from total users by `share_pct` using largest-remainder**, so
+  the per-flow counts sum exactly to the total. Throughput is apportioned the same way. The Constant
+  Throughput Timer is configured in **samples per minute** (`tps × 60`, `tpm × 1`, `tph ÷ 60`), with
+  "calculate throughput based on" set to *all active threads in current thread group*.
+- **Think time goes inside the Transaction Controller, and every controller carries an explicit
+  `<boolProp name="TransactionController.includeTimers">false</boolProp>`.** Do not rely on the
+  element default. JMeter timers are scoped, not sequential — a timer fires before every sampler in
+  its scope, so timers emitted as siblings at thread-group level stack, and a 3-step flow with 3s
+  think time would pause 9s before every request. Keeping the timer inside the controller scopes it
+  to one sampler; `includeTimers=false` keeps the delay out of the transaction's elapsed time, so
+  the p95 the SLA is judged on stays measurable.
 - **When `auth.strategy == per_thread`**, auth moves inside each thread group and the token
   variable becomes `scope: thread`. No setUp group.
 - **When `auth.refresh_required` is true**, warn loudly in the run summary and add a comment in
@@ -312,6 +345,8 @@ needed, ask first.
 - Test result analysis, reporting, dashboards.
 - Test data generation or CSV Data Set wiring. Where a spec field is parameterised, emit a named
   placeholder so a data set can be attached later — nothing more.
+- **OpenAPI/Swagger pre-fill of the Flow steps sheet.** `API reference location` is recorded in the
+  IR for reference and nothing reads it.
 - Vector databases, embeddings, RAG. The inputs fit in context; retrieval would make the model's
   view of them lossy rather than better.
 - Retry logic inside generated scripts.
@@ -384,7 +419,10 @@ than as scripts that silently will not open.
 
 - The emitter is unit-tested against IR fixtures with no LLM and no network.
 - The workbook parser is tested against a deliberately mangled spec: inserted rows, renamed
-  sections, example rows left in, missing required fields.
+  sections, reordered columns, missing required fields.
+- The workbook parser is also tested against `sample_filled.xlsx`, whose `Value` column differs
+  from its `Example` column on every free-text row — a parser reading the wrong column fails this
+  fixture rather than passing by coincidence.
 - The correlation filters are tested against a synthetic traffic record containing known
   false-positive bait (`"true"`, `"USD"`, `200`, an echoed client value).
 - Golden-file tests on emitted JMX, compared structurally rather than by string equality.

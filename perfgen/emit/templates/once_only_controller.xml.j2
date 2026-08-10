@@ -1,0 +1,3 @@
+{# Runs on each thread's first iteration only. Used for per-thread auth: every virtual user logs
+   in once and reuses its own token for the rest of the run. #}
+<OnceOnlyController guiclass="OnceOnlyControllerGui" testclass="OnceOnlyController" testname="{{ testname }}" enabled="true"/>

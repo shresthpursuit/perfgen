@@ -1,0 +1,18 @@
+llm:
+  provider: claude-code
+  model: ""            # blank = default
+  temperature: 0.2
+probe:
+  enabled: true
+  timeout_s: 30
+secrets:
+  provider: env
+jmeter:
+  version: "5.6.3"     # emitter templates are version-sensitive; a change here should fail the
+                       # golden-file test rather than silently produce scripts JMeter won't open
+paths:
+  specs: data/specs
+  ir: data/ir
+  probe_records: data/probe
+  outputs: outputs
+  logs: logs
