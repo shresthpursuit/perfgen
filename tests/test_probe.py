@@ -411,6 +411,85 @@ def test_unexpected_status_warns_but_keeps_going():
     assert len(outcome.record.calls) == 3
 
 
+def test_static_auth_probes_flows_authenticated(monkeypatch):
+    """The probe used to walk flows unauthenticated for static schemes, so every step 401'd."""
+    monkeypatch.setenv("PERF_API_TOKEN", "static-token-9f2c")
+    ir = build_ir(auth=False)
+    ir.auth = Auth(
+        type=AuthType.BEARER_STATIC,
+        static_credential_refs=["perf-api-token"],
+        header_name="Authorization",
+        value_format="Bearer {token}",
+    )
+
+    api = StubApi()
+    with api.client() as client:
+        outcome = run_probe(ir, client=client)
+
+    assert not outcome.degraded
+    assert not any("token" in path for path in api.paths), "no token call for a static scheme"
+    catalogue = [r for r in api.requests if "catalogue" in r.url.path]
+    assert catalogue
+    assert all(r.headers.get("Authorization") == "Bearer static-token-9f2c" for r in catalogue)
+
+
+def test_static_auth_basic_encodes_the_pair(monkeypatch):
+    monkeypatch.setenv("PERF_USER", "alice")
+    monkeypatch.setenv("PERF_PASSWORD", "hunter2")
+    ir = build_ir(auth=False)
+    ir.auth = Auth(
+        type=AuthType.BASIC,
+        static_credential_refs=["perf-user", "perf-password"],
+        header_name="Authorization",
+        value_format="Basic {token}",
+    )
+
+    api = StubApi()
+    with api.client() as client:
+        run_probe(ir, client=client)
+
+    catalogue = [r for r in api.requests if "catalogue" in r.url.path]
+    assert all(
+        r.headers.get("Authorization") == "Basic YWxpY2U6aHVudGVyMg==" for r in catalogue
+    )
+
+
+def test_static_auth_secret_never_reaches_the_record(tmp_path, monkeypatch):
+    monkeypatch.setenv("PERF_API_TOKEN", "static-token-9f2c")
+    ir = build_ir(auth=False)
+    ir.auth = Auth(
+        type=AuthType.BEARER_STATIC,
+        static_credential_refs=["perf-api-token"],
+        header_name="Authorization",
+        value_format="Bearer {token}",
+    )
+
+    with StubApi().client() as client:
+        outcome = run_probe(ir, client=client)
+
+    written = dump_record(outcome.record, tmp_path / "record.json").read_text(encoding="utf-8")
+    assert "static-token-9f2c" not in written
+
+
+def test_missing_static_secret_degrades_naming_the_variable(monkeypatch):
+    monkeypatch.delenv("PERF_API_TOKEN", raising=False)
+    ir = build_ir(auth=False)
+    ir.auth = Auth(
+        type=AuthType.BEARER_STATIC,
+        static_credential_refs=["perf-api-token"],
+        header_name="Authorization",
+        value_format="Bearer {token}",
+    )
+
+    api = StubApi()
+    with api.client() as client:
+        outcome = run_probe(ir, client=client)
+
+    assert outcome.degraded
+    assert "PERF_API_TOKEN" in outcome.record.degraded_reason
+    assert api.requests == []
+
+
 def test_no_auth_spec_probes_flows_directly():
     api = StubApi()
     ir = build_ir(auth=False)

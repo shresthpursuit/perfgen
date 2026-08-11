@@ -86,6 +86,19 @@ def env_var(reference_name: str) -> str:
     return env_var_name(reference_name)
 
 
+def basic_auth_lookup(user_ref: str, password_ref: str) -> str:
+    """Base64 of `user:password`, computed at run time so neither value is ever written down.
+
+    `__base64Encode` is not a core JMeter function - it ships with the jpgc plugin, verified by
+    inspecting the shipped ApacheJMeter_functions.jar - so the encoding is done in Groovy, which
+    is core. Deliberately comma-free: JMeter splits function arguments on commas, and a comma
+    inside the expression would be read as a second argument to __groovy.
+    """
+    user = f"System.getenv('{env_var_name(user_ref)}')"
+    password = f"System.getenv('{env_var_name(password_ref)}')"
+    return f"${{__groovy(({user}+':'+{password}).bytes.encodeBase64().toString())}}"
+
+
 def env_lookup(reference_name: str) -> str:
     """A run-time environment lookup that works in stock JMeter.
 

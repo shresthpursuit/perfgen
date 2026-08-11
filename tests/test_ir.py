@@ -76,9 +76,43 @@ def test_oauth_requires_a_token_request():
 
 def test_static_auth_needs_no_token_request():
     auth = Auth(
-        type=AuthType.API_KEY, header_name="X-API-Key", value_format="{token}"
+        type=AuthType.API_KEY,
+        header_name="X-API-Key",
+        value_format="{token}",
+        static_credential_refs=["perf-api-key"],
     )
     assert auth.token_request is None
+    assert auth.static_credential_refs == ["perf-api-key"]
+
+
+def test_static_auth_without_a_credential_reference_is_rejected():
+    """It has no token call, so the header is the only place a secret can come from."""
+    with pytest.raises(ValidationError, match="static_credential_refs required"):
+        Auth(
+            type=AuthType.BEARER_STATIC,
+            header_name="Authorization",
+            value_format="Bearer {token}",
+        )
+
+
+def test_basic_auth_accepts_a_user_and_a_password_reference():
+    auth = Auth(
+        type=AuthType.BASIC,
+        header_name="Authorization",
+        value_format="Basic {token}",
+        static_credential_refs=["perf-user", "perf-password"],
+    )
+    assert len(auth.static_credential_refs) == 2
+
+
+def test_too_many_static_credential_references_are_rejected():
+    with pytest.raises(ValidationError, match="at most 1 reference"):
+        Auth(
+            type=AuthType.BEARER_STATIC,
+            header_name="Authorization",
+            value_format="Bearer {token}",
+            static_credential_refs=["one", "two"],
+        )
 
 
 def test_refresh_required_is_derived(auth_shared_token):

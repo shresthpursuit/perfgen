@@ -244,14 +244,40 @@ def _content_type_headers(step: Step) -> dict[str, str]:
 
 
 def _auth_header(ir: TestPlanIR) -> dict[str, str]:
-    """The auth header, reading the token from wherever its scope put it."""
-    if ir.auth.type is AuthType.NONE or ir.auth.token_extract is None:
+    """The auth header, reading the credential from wherever it actually lives.
+
+    Two shapes. An OAuth token was fetched at run time and sits in a variable or a property,
+    depending on its scope. A static scheme has no token call at all: its secret is read straight
+    from the environment, which is why these types emitted no header until this was fixed.
+    """
+    if ir.auth.type is AuthType.NONE:
         return {}
-    token_var = ir.auth.token_extract.var
-    is_global = ir.auth.strategy is AuthStrategy.SHARED_SETUP
-    reference = naming.var_ref(token_var, is_global)
+
+    reference = _credential_reference(ir)
+    if reference is None:
+        return {}
+
     value = (ir.auth.value_format or "{token}").replace("{token}", reference)
     return {ir.auth.header_name or "Authorization": value}
+
+
+def _credential_reference(ir: TestPlanIR) -> str | None:
+    """The run-time expression that yields the credential, or None if there is nothing to read."""
+    if ir.auth.type.is_static_credential:
+        refs = ir.auth.static_credential_refs
+        if not refs:
+            return None
+        if ir.auth.type is AuthType.BASIC and len(refs) == 2:
+            # Two references means a user and a password to be encoded together.
+            return naming.basic_auth_lookup(refs[0], refs[1])
+        # One reference: the secret is already whatever the header needs after the scheme word.
+        return naming.env_lookup(refs[0])
+
+    if ir.auth.token_extract is None:
+        return None
+    return naming.var_ref(
+        ir.auth.token_extract.var, ir.auth.strategy is AuthStrategy.SHARED_SETUP
+    )
 
 
 def _headers_node(headers: dict[str, str], testname: str) -> Node | None:

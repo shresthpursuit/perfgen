@@ -18,6 +18,7 @@ Three rules shape it:
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from dataclasses import dataclass, field
@@ -114,8 +115,14 @@ def _acquire_token(
     redactor: Redactor,
     outcome: ProbeOutcome,
 ) -> str | None:
+    if ir.auth.type is AuthType.NONE:
+        return None
+
+    if ir.auth.type.is_static_credential:
+        return _static_credential(ir, record, redactor, outcome)
+
     request_spec = ir.auth.token_request
-    if ir.auth.type is AuthType.NONE or request_spec is None:
+    if request_spec is None:
         return None
 
     try:
@@ -172,6 +179,40 @@ def _acquire_token(
     call.response = _record_response(response, redactor)
     record.calls.append(call)
     return token
+
+
+def _static_credential(
+    ir: TestPlanIR,
+    record: ProbeRecord,
+    redactor: Redactor,
+    outcome: ProbeOutcome,
+) -> str | None:
+    """Resolve the credential for a scheme that has no token call.
+
+    There is nothing to request, but the flows still have to be probed authenticated - otherwise
+    every step 401s and the run captures no useful traffic.
+    """
+    refs = ir.auth.static_credential_refs
+    if not refs:
+        _degrade(record, outcome, f"{ir.auth.type} has no credential reference to read")
+        return None
+
+    try:
+        resolved = secrets.resolve_all(refs)
+    except RuntimeError as exc:
+        _degrade(record, outcome, str(exc))
+        return None
+
+    for value in resolved.values():
+        redactor.add_secret(value)
+
+    if ir.auth.type is AuthType.BASIC and len(refs) == 2:
+        pair = f"{resolved[refs[0]]}:{resolved[refs[1]]}"
+        encoded = base64.b64encode(pair.encode()).decode()
+        redactor.add_secret(encoded)
+        return encoded
+
+    return resolved[refs[0]]
 
 
 def _token_body(param_names: list[str], resolved: dict[str, str]) -> str:

@@ -316,12 +316,31 @@ def _parse_auth(labelled: LabelledSheet, collector: _Collector) -> Auth:
             f"placeholder, so the token will not be substituted into the header.",
         )
 
+    if auth_type is AuthType.OAUTH2_PKCE:
+        # PKCE needs a code_verifier, an /authorize redirect, an interactive login and an
+        # authorization code before any token call. The workbook cannot express an authorize URL
+        # or a redirect URI, and driving a browser is an explicit non-goal - so say that here
+        # rather than sending a request that is certain to be rejected and reporting it as if the
+        # credentials were wrong.
+        collector.blocking(
+            "auth.type",
+            f"{_where('Application', labelled.row_of('Auth type'))}: 'Auth type' is "
+            f"'OAuth2 PKCE'. That flow cannot be run unattended - it needs a browser redirect "
+            f"and someone to log in interactively - so the framework cannot obtain a token for "
+            f"it. If the token can be obtained another way, set 'Auth type' to 'Bearer static' "
+            f"and put the name it is stored under in 'Credential reference names'.",
+        )
+
     token_request = None
     token_extract = None
+    static_refs: list[str] = []
+
     if auth_type.needs_token_request:
         token_request = _parse_token_request(labelled, collector)
         # The expression is discovered by the probe (M3); until then it is unknown, not invented.
         token_extract = TokenExtract(var=DEFAULT_TOKEN_VAR)
+    elif auth_type.is_static_credential:
+        static_refs = _parse_static_credentials(labelled, collector, auth_type)
 
     lifetime = values.as_int(labelled.get("Token lifetime (seconds)"))
     if lifetime is None and cell_text(labelled.get("Token lifetime (seconds)")) is not None:
@@ -337,6 +356,7 @@ def _parse_auth(labelled: LabelledSheet, collector: _Collector) -> Auth:
             strategy=strategy or AuthStrategy.SHARED_SETUP,
             token_request=token_request,
             token_extract=token_extract,
+            static_credential_refs=static_refs,
             lifetime_seconds=lifetime,
             header_name=header_name,
             value_format=value_format,
@@ -344,6 +364,45 @@ def _parse_auth(labelled: LabelledSheet, collector: _Collector) -> Auth:
     except ValueError:
         # Required auth fields are already reported above; fall back so parsing can continue.
         return Auth(type=AuthType.NONE)
+
+
+def _parse_static_credentials(
+    labelled: LabelledSheet, collector: _Collector, auth_type: AuthType
+) -> list[str]:
+    """Read the credential references for a scheme with no token call.
+
+    Bearer static, API key and Basic put a secret straight into the header. One reference names
+    it; Basic may name two, a user and a password to be encoded together at run time.
+    """
+    refs = values.as_lines(labelled.get("Credential reference names"))
+    location = _where("Application", labelled.row_of("Credential reference names"))
+
+    if not refs:
+        collector.blocking(
+            "auth.static_credential_refs",
+            f"{location}: 'Credential reference names' is empty, but '{auth_type.value}' sends a "
+            f"secret in the '{cell_text(labelled.get('Auth header name')) or 'Authorization'}' "
+            f"header. Name the secret it should read - the value itself never goes in the "
+            f"workbook.",
+        )
+        return []
+
+    limit = 2 if auth_type is AuthType.BASIC else 1
+    if len(refs) > limit:
+        expected = (
+            "one for the user and one for the password"
+            if auth_type is AuthType.BASIC
+            else "just one"
+        )
+        collector.blocking(
+            "auth.static_credential_refs",
+            f"{location}: 'Credential reference names' lists {len(refs)} names ({', '.join(refs)}) "
+            f"but '{auth_type.value}' takes {expected}. Which one carries the credential cannot "
+            f"be guessed.",
+        )
+        return []
+
+    return refs
 
 
 def _parse_token_request(labelled: LabelledSheet, collector: _Collector) -> TokenRequest | None:

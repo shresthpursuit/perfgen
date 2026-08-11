@@ -37,6 +37,15 @@ class AuthType(StrEnum):
         """OAuth flows acquire a token from an endpoint; the static schemes do not."""
         return self.value.startswith("oauth2_")
 
+    @property
+    def is_static_credential(self) -> bool:
+        """These carry a secret straight into the header, with no token call to make.
+
+        Their credential is read from the environment at run time, exactly like an OAuth client
+        secret - the difference is only that nothing is exchanged for it first.
+        """
+        return self in {AuthType.BEARER_STATIC, AuthType.API_KEY, AuthType.BASIC}
+
 
 class AuthStrategy(StrEnum):
     SHARED_SETUP = "shared_setup"
@@ -185,6 +194,14 @@ class Auth(_Base):
     lifetime_seconds: int | None = None
     header_name: str | None = None
     value_format: str | None = Field(default=None, description='e.g. "Bearer {token}"')
+    static_credential_refs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Secret reference names carrying the credential for a static scheme "
+            "(bearer_static, api_key, basic). Names only - the value is read at run time. "
+            "One reference for a token or key; two for basic auth's user and password."
+        ),
+    )
     refresh_required: bool | None = Field(
         default=None,
         description="computed at the plan level: any enabled duration > lifetime",
@@ -204,6 +221,21 @@ class Auth(_Base):
             if absent:
                 raise ValueError(
                     f"auth.{'/'.join(absent)} required for OAuth flow {self.type}"
+                )
+        if self.type.is_static_credential:
+            # Without a reference there is no secret to put in the header, and one is never
+            # invented - the script would otherwise authenticate with nothing and 401 on every
+            # request, which reads as a broken API rather than an incomplete spec.
+            if not self.static_credential_refs:
+                raise ValueError(
+                    f"auth.static_credential_refs required for {self.type}: the credential "
+                    f"has to come from somewhere"
+                )
+            limit = 2 if self.type is AuthType.BASIC else 1
+            if len(self.static_credential_refs) > limit:
+                raise ValueError(
+                    f"auth.static_credential_refs for {self.type} takes at most {limit} "
+                    f"reference(s), got {self.static_credential_refs}"
                 )
         return self
 
