@@ -12,12 +12,13 @@ import sys
 from pathlib import Path
 
 from perfgen import secrets
+from perfgen.correlate import ClaudeAdjudicator, correlate
 from perfgen.emit import emit
 from perfgen.emit.naming import slug
 from perfgen.ir.gaps import blocking, detect_gaps, format_gaps
 from perfgen.ir.io import dump_ir, load_ir
 from perfgen.parse import parse_workbook
-from perfgen.probe import apply_outcome, dump_record, run_probe
+from perfgen.probe import apply_outcome, dump_record, load_record, run_probe
 from perfgen.probe.runner import DEFAULT_TIMEOUT_S
 from perfgen.validate import validate_file
 
@@ -64,6 +65,22 @@ def main(argv: list[str] | None = None) -> int:
         "--timeout", type=int, default=DEFAULT_TIMEOUT_S, help="per-request timeout in seconds"
     )
 
+    correlate_cmd = sub.add_parser(
+        "correlate", help="traffic record + IR -> extractors wired into the IR"
+    )
+    correlate_cmd.add_argument("ir", type=Path, help="path to a Test Plan IR YAML file")
+    correlate_cmd.add_argument(
+        "--record",
+        type=Path,
+        default=None,
+        help="traffic record (default: data/probe/{application}.json)",
+    )
+    correlate_cmd.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="run the deterministic scan and report it without adjudicating",
+    )
+
     emit_cmd = sub.add_parser("emit", help="IR YAML -> .jmx")
     emit_cmd.add_argument("ir", type=Path, help="path to a Test Plan IR YAML file")
     emit_cmd.add_argument(
@@ -76,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         return _parse(args.workbook, args.out)
     if args.command == "probe":
         return _probe(args.ir, args.out, args.timeout)
+    if args.command == "correlate":
+        return _correlate(args.ir, args.record, args.no_llm)
     if args.command == "emit":
         return _emit(args.ir, args.out, args.jmeter_version)
     return 2  # pragma: no cover - argparse enforces the choices
@@ -156,6 +175,57 @@ def _parse(workbook_path: Path, out_dir: Path) -> int:
         "\nCorrelations are not filled in yet - the probe (M3) and correlation engine (M4) "
         "supply them.\nNext:\n  perfgen emit " + str(target)
     )
+    return 0
+
+
+def _correlate(ir_path: Path, record_path: Path | None, no_llm: bool) -> int:
+    ir = load_ir(ir_path)
+
+    source = record_path or Path("data/probe") / f"{slug(ir.application.name)}.json"
+    record = load_record(source) if Path(source).is_file() else None
+    if record is None:
+        print(
+            f"No traffic record at {source}. Continuing without one - correlations will be "
+            f"inferred from placeholder names.",
+            file=sys.stderr,
+        )
+
+    adjudicator = None if no_llm else ClaudeAdjudicator()
+    outcome = correlate(ir, record, adjudicator)
+    dump_ir(ir, ir_path)
+
+    print(f"Updated {ir_path}")
+    print(f"  {outcome.scan.summary}")
+    if outcome.llm_called:
+        accepted = len(outcome.adjudication.accepted())
+        print(
+            f"  adjudicated {len(outcome.adjudication.decisions)} candidate(s) in one call: "
+            f"{accepted} accepted"
+        )
+    elif outcome.skip_reason:
+        print(f"  no model call: {outcome.skip_reason}")
+    print(f"  {outcome.extracts_written} extractor(s) written")
+
+    for rejection in outcome.scan.rejected:
+        print(f"    [filtered: {rejection.filter_name}] {rejection.value!r} - {rejection.reason}")
+
+    if outcome.warnings:
+        print("\nWarnings:")
+        for warning in outcome.warnings:
+            print(f"  ! {warning}")
+
+    review = [
+        extract
+        for flow in ir.flows
+        for step in flow.steps
+        for extract in step.extracts
+        if extract.needs_review
+    ]
+    if review:
+        print(
+            f"\n{len(review)} extractor(s) need review before this script is trusted: "
+            + ", ".join(sorted(e.var for e in review))
+        )
     return 0
 
 
