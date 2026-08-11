@@ -169,17 +169,26 @@ def _bullet(text: str) -> list[str]:
 
 
 def _wrap(text: str, width: int) -> list[str]:
-    words = " ".join(text.split()).split(" ")
+    """Wrap to width, keeping the author's own line breaks.
+
+    Messages that list things - "reference -> VARIABLE", one per line - become unreadable if the
+    listing is flattened into a paragraph, which is what collapsing every whitespace run does.
+    """
     lines: list[str] = []
-    current = ""
-    for word in words:
-        if current and len(current) + 1 + len(word) > width:
+    for segment in text.splitlines():
+        words = segment.split()
+        if not words:
+            lines.append("")
+            continue
+        current = ""
+        for word in words:
+            if current and len(current) + 1 + len(word) > width:
+                lines.append(current)
+                current = word
+            else:
+                current = f"{current} {word}".strip()
+        if current:
             lines.append(current)
-            current = word
-        else:
-            current = f"{current} {word}".strip()
-    if current:
-        lines.append(current)
     return lines or [""]
 
 

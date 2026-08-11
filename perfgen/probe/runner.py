@@ -452,6 +452,8 @@ def _degrade(record: ProbeRecord, outcome: ProbeOutcome, reason: str) -> None:
     record.degraded = True
     record.degraded_reason = reason
     outcome.warnings.append(
-        f"The probe could not run: {reason}. Correlations will be inferred from placeholder "
-        f"names rather than observed traffic, and must be reviewed before the script is trusted."
+        # Reasons come from exception messages, which usually punctuate themselves.
+        f"The probe could not run: {reason.rstrip().rstrip('.')}.\n"
+        f"Correlations will be inferred from placeholder names rather than observed traffic, "
+        f"and must be reviewed before the script is trusted."
     )

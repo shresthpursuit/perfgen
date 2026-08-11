@@ -212,6 +212,21 @@ def test_warnings_gaps_and_artifacts_are_all_rendered(tmp_path):
     assert "jmeter -n -t plan.jmx" in text
 
 
+def test_a_listing_keeps_its_line_structure():
+    """Flattening a two-line secret listing into a paragraph makes it unreadable."""
+    listing = (
+        "The specification references secrets that are not set in the environment:\n"
+        "  claims-perf-id  ->  CLAIMS_PERF_ID\n"
+        "  claims-perf-secret  ->  CLAIMS_PERF_SECRET\n"
+        "Set them for this shell, or add them to a .env file."
+    )
+    text = summarise(build_ir([]), warnings=[listing]).render()
+
+    assert "claims-perf-id -> CLAIMS_PERF_ID" in text
+    assert "claims-perf-secret -> CLAIMS_PERF_SECRET" in text
+    assert "CLAIMS_PERF_ID claims-perf-secret" not in text, "the two entries ran together"
+
+
 def test_long_evidence_is_wrapped_not_truncated():
     long_evidence = " ".join(["evidence"] * 40)
     text = summarise(build_ir([

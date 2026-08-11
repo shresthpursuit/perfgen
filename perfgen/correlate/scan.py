@@ -13,6 +13,17 @@ sent, and a reviewer stops reading. Both are required:
 * **Client-originated.** If a value is in request N *and* response N, the server echoed back what
   the client sent. It came from the spec, not from the server, so wiring an extractor for it adds
   a moving part that replaces a constant with the same constant.
+
+**A declared placeholder is exempt from the low-entropy filter.** When the spec author wrote
+`{id}` in a path and the probe resolved it from a particular response field, that is a dependency
+someone stated, not a string that happened to match - so how short or ordinary the value looks
+tells us nothing. Found by running against a real API: jsonplaceholder returns `"id": 101`, and a
+three-character integer is exactly what the entropy rule exists to discard. Integer primary keys
+are among the most common identifiers there are.
+
+The exemption is deliberately narrow. It covers low entropy only: a value the client sent and the
+server echoed back is still static even if a placeholder points at it, so the client-originated
+filter keeps running at full strength.
 """
 
 from __future__ import annotations
@@ -146,10 +157,24 @@ def is_client_originated(value: str, source_call: RecordedCall) -> bool:
 # --------------------------------------------------------------------------------------------
 
 
+def declared_bindings(record: ProbeRecord) -> dict[tuple[int, str], str]:
+    """`(consuming call position, response path) -> placeholder name` for declared dependencies.
+
+    The probe records these when it fills a `{placeholder}` to walk a flow. They are the spec
+    author's own statement that one call depends on another.
+    """
+    bindings: dict[tuple[int, str], str] = {}
+    for position, call in enumerate(record.calls):
+        for placeholder, json_path in call.placeholder_bindings.items():
+            bindings[(position, json_path)] = placeholder
+    return bindings
+
+
 def find_candidates(record: ProbeRecord) -> ScanResult:
     """Scan a traffic record for values produced by one call and reused by a later one."""
     result = ScanResult()
     calls = record.calls
+    bindings = declared_bindings(record)
 
     # How many distinct responses each value came back from, for the ubiquity check.
     appearances: dict[str, set[int]] = {}
@@ -182,18 +207,22 @@ def find_candidates(record: ProbeRecord) -> ScanResult:
                     continue
                 seen.add(key)
 
-                reason = low_entropy_reason(value, len(appearances.get(value, ())))
-                if reason is not None:
-                    result.rejected.append(
-                        Rejection(
-                            value=value,
-                            filter_name="low_entropy",
-                            reason=reason,
-                            source_step_name=call.name,
-                            used_step_name=later.name,
+                # The spec declared this dependency, so entropy says nothing about it.
+                declared = bindings.get((used_position, location))
+
+                if declared is None:
+                    reason = low_entropy_reason(value, len(appearances.get(value, ())))
+                    if reason is not None:
+                        result.rejected.append(
+                            Rejection(
+                                value=value,
+                                filter_name="low_entropy",
+                                reason=reason,
+                                source_step_name=call.name,
+                                used_step_name=later.name,
+                            )
                         )
-                    )
-                    continue
+                        continue
 
                 if is_client_originated(value, call):
                     result.rejected.append(
@@ -225,6 +254,7 @@ def find_candidates(record: ProbeRecord) -> ScanResult:
                         used_step_name=later.name,
                         used_kind=used_kind,
                         used_detail=used_detail,
+                        declared_placeholder=declared,
                     )
                 )
                 next_id += 1

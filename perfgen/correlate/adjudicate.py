@@ -101,6 +101,12 @@ def build_prompt(candidates: list[Candidate]) -> str:
         lines.append(
             f"  same flow:        {'yes' if candidate.same_flow else 'no'}"
         )
+        if candidate.declared_placeholder:
+            lines.append(
+                f"  declared:         the specification writes "
+                f"{{{candidate.declared_placeholder}}} at this position, so its author states "
+                f"this call depends on the earlier one"
+            )
         lines.append("")
     return "\n".join(lines)
 

@@ -41,6 +41,14 @@ class Candidate(_Base):
     used_kind: UseKind
     used_detail: str = Field(description="header name, or the surrounding text of the match")
 
+    declared_placeholder: str | None = Field(
+        default=None,
+        description=(
+            "The `{placeholder}` in the spec that this value filled, when the probe recorded one. "
+            "A declared dependency rather than a coincidental string match."
+        ),
+    )
+
     @property
     def same_flow(self) -> bool:
         return self.source_flow_id == self.used_flow_id

@@ -357,6 +357,20 @@ def test_missing_credential_degrades_rather_than_raising(monkeypatch):
     assert api.requests == [], "nothing should be called without credentials"
 
 
+def test_degrade_message_is_not_double_punctuated():
+    """Reasons come from exception messages, which usually punctuate themselves already."""
+    from perfgen.probe.records import ProbeRecord
+    from perfgen.probe.runner import ProbeOutcome, _degrade
+
+    record = ProbeRecord(application="x", performed_at="now")
+    outcome = ProbeOutcome(record=record)
+    _degrade(record, outcome, "The environment is unreachable.")
+
+    warning = outcome.warnings[0]
+    assert "unreachable.." not in warning
+    assert "The probe could not run: The environment is unreachable." in warning
+
+
 def test_unreachable_environment_degrades():
     def explode(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("name or service not known", request=request)

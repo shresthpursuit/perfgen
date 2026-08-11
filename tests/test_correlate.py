@@ -27,7 +27,13 @@ from perfgen.ir.models import (
     Step,
     TestPlanIR,
 )
-from perfgen.probe.records import SkippedFlow
+from perfgen.probe.records import (
+    ProbeRecord,
+    RecordedCall,
+    RecordedRequest,
+    RecordedResponse,
+    SkippedFlow,
+)
 from tests.fixtures.traffic import (
     ECHOED_CLIENT_VALUE,
     REAL_ITEM_ID,
@@ -219,6 +225,111 @@ def test_the_server_generated_sibling_of_an_echoed_value_still_survives():
     result = find_candidates(bait_record())
     assert REAL_REQUEST_REF in values_of(result)
     assert ECHOED_CLIENT_VALUE not in values_of(result)
+
+
+# --------------------------------------------------------------------------------------------
+# The exemption: a declared placeholder outranks the entropy rule
+#
+# Found by running against jsonplaceholder, which returns `"id": 101`. A three-character integer
+# is exactly what the low-entropy rule exists to discard, and integer primary keys are among the
+# most common identifiers there are - so the rule was throwing away real correlations. Where the
+# spec author wrote `{id}` and the probe resolved it from a particular field, that is a stated
+# dependency and entropy says nothing about it.
+# --------------------------------------------------------------------------------------------
+
+
+def short_id_record() -> ProbeRecord:
+    """The real jsonplaceholder shape: POST returns id 101, GET fetches /posts/101."""
+    return ProbeRecord(
+        application="Smoke",
+        performed_at="2026-08-11T00:00:00Z",
+        calls=[
+            RecordedCall(
+                flow_id="F01",
+                step_index=1,
+                name="Create post",
+                request=RecordedRequest(
+                    method="POST",
+                    url="https://api.example.internal/posts",
+                    body='{"title": "perf test", "userId": 1}',
+                ),
+                response=RecordedResponse(
+                    status=201, body=json.dumps({"title": "perf test", "userId": 1, "id": 101})
+                ),
+            ),
+            RecordedCall(
+                flow_id="F01",
+                step_index=2,
+                name="Fetch created post",
+                request=RecordedRequest(
+                    method="GET", url="https://api.example.internal/posts/101"
+                ),
+                response=RecordedResponse(status=200, body=json.dumps({"id": 101})),
+                placeholder_bindings={"id": "$.id"},
+            ),
+        ],
+    )
+
+
+def test_a_short_declared_value_survives_the_entropy_filter():
+    """101 is three characters; without the exemption it is discarded as coincidence."""
+    result = find_candidates(short_id_record())
+
+    assert "101" in values_of(result), [r.reason for r in result.rejected]
+    assert "101" not in rejected_values(result, "low_entropy")
+
+
+def test_the_surviving_candidate_carries_the_declaration():
+    candidate = next(c for c in find_candidates(short_id_record()).candidates if c.value == "101")
+    assert candidate.declared_placeholder == "id"
+    assert candidate.source_location == "$.id"
+
+
+def test_a_short_declared_value_reaches_the_adjudicator():
+    fake = FakeAdjudicator()
+    correlate(build_ir(), short_id_record(), fake)
+
+    assert len(fake.calls) == 1
+    assert "101" in {c.value for c in fake.calls[0]}
+
+
+def test_a_declared_value_becomes_a_verified_extractor():
+    """The whole point: real observed traffic must yield verified, not a guess."""
+    ir = build_ir()
+    correlate(ir, short_id_record(), FakeAdjudicator())
+
+    extract = ir.flow("F01").steps[0].extracts[0]
+    assert extract.var == "id"
+    assert extract.expr == "$.id", "the observed path, not the recursive-descent fallback"
+    assert extract.confidence is Confidence.VERIFIED
+    assert extract.needs_review is False
+
+
+def test_the_prompt_tells_the_model_the_dependency_was_declared():
+    prompt = build_prompt(find_candidates(short_id_record()).candidates)
+    assert "declared:" in prompt
+    assert "{id}" in prompt
+
+
+def test_an_undeclared_short_value_is_still_rejected():
+    """The exemption is not a licence to lower the bar generally."""
+    record = short_id_record()
+    record.calls[1].placeholder_bindings = {}
+    result = find_candidates(record)
+
+    assert "101" not in values_of(result)
+    assert "101" in rejected_values(result, "low_entropy")
+
+
+def test_a_declared_placeholder_does_not_excuse_a_client_echoed_value():
+    """The exemption covers low entropy only; an echoed value is static whatever points at it."""
+    record = bait_record()
+    # Pretend the spec declared a placeholder for the value the client itself supplied.
+    record.calls[3].placeholder_bindings = {"clientRef": "$.clientRef"}
+    result = find_candidates(record)
+
+    assert ECHOED_CLIENT_VALUE not in values_of(result)
+    assert ECHOED_CLIENT_VALUE in rejected_values(result, "client_originated")
 
 
 # --------------------------------------------------------------------------------------------
