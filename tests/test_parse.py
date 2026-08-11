@@ -559,4 +559,4 @@ def test_non_ascii_gap_message_can_be_printed_on_a_legacy_console(tmp_path, caps
     workbook = write_workbook(tmp_path / "spec.xlsx", spec)
 
     assert main(["parse", str(workbook), "--out", str(tmp_path / "ir")]) == 1
-    assert "BLOCKING" in capsys.readouterr().err
+    assert "BLOCKING" in capsys.readouterr().out

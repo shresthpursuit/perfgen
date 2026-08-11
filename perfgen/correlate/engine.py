@@ -77,11 +77,22 @@ def correlate(
 
     by_id = {candidate.id: candidate for candidate in scan.candidates}
     probe_observed = not record.degraded
+    placeholders = _placeholder_names(record)
 
     for decision in outcome.adjudication.accepted():
         candidate = by_id.get(decision.candidate_id)
         if candidate is None:
             continue
+        # The spec's own placeholder wins over the model's choice of name. If the path says
+        # {itemId} and the extractor is called `id`, nothing resolves it and the script sends the
+        # literal text - so where the probe recorded which placeholder a value filled, that name
+        # is authoritative.
+        spec_name = placeholders.get(
+            (candidate.used_flow_id, candidate.used_step_index, candidate.source_location)
+        )
+        if spec_name:
+            decision = decision.model_copy(update={"var": spec_name})
+
         if _write_extract(ir, candidate, decision, probe_observed):
             outcome.extracts_written += 1
             if decision.transformed:
@@ -91,7 +102,6 @@ def correlate(
                     f"inferred and needs review - a wrong extractor here fails silently under load."
                 )
 
-    _rewrite_paths(ir)
     _infer_remaining_placeholders(ir, record, outcome)
     return outcome
 
@@ -145,9 +155,20 @@ def _expression_for(candidate: Candidate, decision: Adjudication) -> str:
     return f"{left[-12:]}||{right[:12]}" if left or right else "||"
 
 
-def _rewrite_paths(ir: TestPlanIR) -> None:
-    """No-op placeholder hook: the emitter resolves `{var}` from extract scope at emit time."""
-    return
+def _placeholder_names(record: ProbeRecord) -> dict[tuple[str, int, str], str]:
+    """Which `{placeholder}` each observed value filled, keyed by where it was consumed.
+
+    Recorded by the probe when it walked the flow: to call step 2 at all it had to put something
+    where `{itemId}` was, and it wrote down both the name and the response path it took the value
+    from.
+    """
+    names: dict[tuple[str, int, str], str] = {}
+    for call in record.calls:
+        if call.flow_id is None or call.step_index is None:
+            continue
+        for placeholder, json_path in call.placeholder_bindings.items():
+            names[(call.flow_id, call.step_index, json_path)] = placeholder
+    return names
 
 
 # --------------------------------------------------------------------------------------------
@@ -176,18 +197,33 @@ def _infer_without_traffic(ir: TestPlanIR, record: ProbeRecord | None) -> Correl
 def _infer_remaining_placeholders(
     ir: TestPlanIR, record: ProbeRecord, outcome: CorrelationOutcome
 ) -> None:
-    """Flows the probe never called still have placeholders that nothing produces."""
+    """Wire up any `{placeholder}` still left without a producer, as an explicit guess.
+
+    Several routes end here: a flow the probe never called, a scan that found no candidate for a
+    particular value, or a run made without adjudication. They have one thing in common - the
+    emitter would otherwise write `{itemId}` into the script as literal text, which fails
+    structural validation and, if it ever escaped that, would send the string to the server.
+
+    A labelled guess is recoverable. A dangling placeholder is not.
+    """
     skipped = set(record.skipped_flow_ids)
-    if not skipped:
+    written = _infer_from_placeholders(ir)
+    if not written:
         return
-    written = _infer_from_placeholders(ir, only_flows=skipped)
-    if written:
-        outcome.extracts_written += written
-        outcome.warnings.append(
-            f"{written} correlation(s) in flow(s) {', '.join(sorted(skipped))} were inferred from "
-            f"placeholder names, because those flows were never called. Each is marked "
-            f"needs_review."
+
+    outcome.extracts_written += written
+    if skipped:
+        reason = (
+            f"they include flow(s) {', '.join(sorted(skipped))}, which were never called, "
+            f"so nothing was observed to correlate against"
         )
+    else:
+        reason = "no observed traffic accounted for them"
+
+    outcome.warnings.append(
+        f"{written} correlation(s) were inferred from placeholder names because {reason}. "
+        f"Each is marked needs_review."
+    )
 
 
 def _infer_from_placeholders(ir: TestPlanIR, only_flows: set[str] | None = None) -> int:

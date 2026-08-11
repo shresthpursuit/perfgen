@@ -250,7 +250,12 @@ def test_accepted_decisions_become_extractors_on_the_producing_step():
     assert search.extracts[0].used_by == ["F01.2.path"]
 
 
-def test_rejected_decisions_write_nothing():
+def test_rejected_decisions_produce_no_verified_extractor():
+    """Rejecting a candidate still leaves the spec's {placeholder} needing something.
+
+    It falls back to a labelled guess rather than nothing: an unresolved placeholder is emitted as
+    literal text and sent to the server, which is worse than a guess a reviewer can see.
+    """
     fake = FakeAdjudicator(
         decisions=[
             Adjudication(candidate_id=1, accept=False, reason="coincidence"),
@@ -258,10 +263,11 @@ def test_rejected_decisions_write_nothing():
         ]
     )
     ir = build_ir()
-    outcome = correlate(ir, bait_record(), fake)
+    correlate(ir, bait_record(), fake)
 
-    assert outcome.extracts_written == 0
-    assert all(not step.extracts for flow in ir.flows for step in flow.steps)
+    written = [e for f in ir.flows for s in f.steps for e in s.extracts]
+    assert all(e.confidence is Confidence.INFERRED for e in written)
+    assert all(e.needs_review for e in written)
 
 
 def test_transformed_values_are_inferred_and_flagged():
@@ -306,8 +312,10 @@ def test_decisions_for_unknown_candidate_ids_are_discarded():
         decisions=[Adjudication(candidate_id=999, accept=True, var="invented")]
     )
     ir = build_ir()
-    outcome = correlate(ir, bait_record(), fake)
-    assert outcome.extracts_written == 0
+    correlate(ir, bait_record(), fake)
+
+    written = {e.var for f in ir.flows for s in f.steps for e in s.extracts}
+    assert "invented" not in written, "the model cannot introduce a correlation the scan never saw"
 
 
 def test_parse_response_drops_invented_ids():

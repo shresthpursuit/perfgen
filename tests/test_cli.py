@@ -70,10 +70,10 @@ def test_blocking_gap_exits_non_zero_and_writes_nothing(tmp_path, simple_flow, c
     assert exit_code == 1
     assert not out_root.exists(), "nothing should be generated when a blocking gap is present"
 
-    stderr = capsys.readouterr().err
-    assert "BLOCKING" in stderr
-    assert "Load profiles, row 2 (Baseline)" in stderr
-    assert "Concurrent users" in stderr
+    report = capsys.readouterr().out
+    assert "BLOCKING" in report
+    assert "Load profiles, row 2 (Baseline)" in report
+    assert "Concurrent users" in report
 
 
 def test_warning_gap_does_not_block(tmp_path, simple_flow):
@@ -145,16 +145,16 @@ def test_parse_exits_non_zero_on_a_blocking_gap_and_writes_nothing(tmp_path, cap
 
     assert exit_code == 1
     assert not out_dir.exists(), "no IR should be written when a blocking gap is present"
-    stderr = capsys.readouterr().err
-    assert "BLOCKING" in stderr
-    assert "Base URL" in stderr
+    report = capsys.readouterr().out
+    assert "BLOCKING" in report
+    assert "Base URL" in report
 
 
 def test_parse_reports_warnings_but_still_succeeds(tmp_path, capsys):
     spec = set_application_value(WorkbookSpec(), "Auth header value format", "Bearer")
     workbook = write_workbook(tmp_path / "spec.xlsx", spec)
     assert main(["parse", str(workbook), "--out", str(tmp_path / "ir")]) == 0
-    assert "warning" in capsys.readouterr().err
+    assert "warning" in capsys.readouterr().out
 
 
 def test_parse_surfaces_structural_gaps_not_just_parse_gaps(tmp_path, capsys):
@@ -167,16 +167,16 @@ def test_parse_surfaces_structural_gaps_not_just_parse_gaps(tmp_path, capsys):
     exit_code = main(["parse", str(workbook), "--out", str(tmp_path / "ir")])
 
     assert exit_code == 1
-    stderr = capsys.readouterr().err
-    assert "load_profiles.baseline.users" in stderr
-    assert "Concurrent users" in stderr
+    report = capsys.readouterr().out
+    assert "load_profiles.baseline.users" in report
+    assert "Concurrent users" in report
 
 
 def test_missing_token_expression_does_not_block_parsing(tmp_path, capsys):
     """The probe supplies it next; blocking here would make every OAuth spec unparseable."""
     workbook = write_workbook(tmp_path / "spec.xlsx")
     assert main(["parse", str(workbook), "--out", str(tmp_path / "ir")]) == 0
-    assert "auth.token_extract.expr" in capsys.readouterr().err
+    assert "auth.token_extract.expr" in capsys.readouterr().out
 
 
 def test_parsed_ir_is_not_yet_emittable_without_a_probe(tmp_path):

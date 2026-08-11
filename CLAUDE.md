@@ -33,7 +33,8 @@ stage writes its artifact to disk before the next reads it and is independently 
 2. **M2** — workbook parser, gap reporting, non-zero exit on blocking gaps.
 3. **M3** — probe runner; traffic captured to disk; `probe_safe: false` never executed.
 4. **M4** — correlation: deterministic candidate scan (both filters), then one LLM call.
-5. **M5** — CLI, config file, output layout, run summary.
+5. **M5** — CLI, config file, output layout, run summary. `perfgen run` does all stages;
+   `parse`/`probe`/`correlate`/`emit` re-run any one of them from the previous stage's artifact.
 
 ## Amendments to the brief (authoritative where they conflict)
 
@@ -49,6 +50,12 @@ stage writes its artifact to disk before the next reads it and is independently 
 - **D3 — an enabled load profile with a throughput target but no user count is a `blocking` gap**,
   naming the sheet and row to fill in. Never default the thread count.
 - `application.api_reference` is stored in the IR with no behaviour attached.
+- **The run summary leads with what was guessed**, not with what worked: a count, a ratio, and
+  each flagged extractor's evidence. A wrong correlation does not crash - the script runs, passes
+  and measures nothing - so it has to be caught by reading, before the run.
+- **`llm.temperature` cannot be honoured** by the `claude-code` provider: `ClaudeAgentOptions` has
+  no such field and the CLI rejects `--temperature`. Setting it prints a configuration warning
+  rather than being silently dropped. `llm.model` does work.
 
 ## Non-goals — do not build, scaffold, stub, or leave hooks for
 

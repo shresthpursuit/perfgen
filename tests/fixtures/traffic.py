@@ -37,6 +37,7 @@ def _call(
     status: int = 200,
     response_body: dict | None = None,
     response_headers: dict[str, str] | None = None,
+    placeholder_bindings: dict[str, str] | None = None,
 ) -> RecordedCall:
     return RecordedCall(
         flow_id=flow_id,
@@ -53,6 +54,7 @@ def _call(
             headers={"Content-Type": "application/json", **(response_headers or {})},
             body=json.dumps(response_body) if response_body is not None else None,
         ),
+        placeholder_bindings=placeholder_bindings or {},
     )
 
 
@@ -88,6 +90,9 @@ def bait_record() -> ProbeRecord:
                     "?includeStock=true&currency=USD&limit=200"
                 ),
                 response_body={"id": REAL_ITEM_ID, "stock": 7, "currency": "USD"},
+                # The probe had to fill {itemId} to make this call at all, and recorded where the
+                # value came from. That is what ties the extractor back to the spec's own name.
+                placeholder_bindings={"itemId": "$.results[0].id"},
             ),
             # 3. The client sends its own reference; the server echoes it back verbatim.
             _call(
@@ -117,6 +122,7 @@ def bait_record() -> ProbeRecord:
                     f"?clientRef={ECHOED_CLIENT_VALUE}&verbose=true"
                 ),
                 response_body={"state": "pending"},
+                placeholder_bindings={"requestRef": "$.requestRef"},
             ),
         ],
     )

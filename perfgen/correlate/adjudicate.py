@@ -155,11 +155,21 @@ def _extract_json(text: str) -> dict | None:
 
 
 class ClaudeAdjudicator:
-    """The real call site, via the Claude Agent SDK."""
+    """The real call site, via the Claude Agent SDK.
 
-    def __init__(self, model: str = "", temperature: float = 0.2):
+    `model` comes from `config.yaml` and is passed through. `temperature` cannot be: the SDK's
+    options carry no temperature, and passing `--temperature` to the underlying CLI fails the call
+    with "unknown option". Rather than accept a setting and ignore it, the configuration layer
+    reports it as unsupported and the run summary prints that - see
+    `LLMConfig.unsupported_settings`.
+    """
+
+    def __init__(self, model: str = ""):
         self.model = model
-        self.temperature = temperature
+
+    @classmethod
+    def from_config(cls, config) -> ClaudeAdjudicator:
+        return cls(model=config.llm.model)
 
     def adjudicate(self, candidates: list[Candidate]) -> AdjudicationResult:
         if not candidates:
@@ -167,7 +177,7 @@ class ClaudeAdjudicator:
 
         text = self._ask(build_prompt(candidates))
         result = parse_response(text, candidates)
-        result.model = self.model or "default"
+        result.model = self.model or "provider default"
         return result
 
     def _ask(self, prompt: str) -> str:
