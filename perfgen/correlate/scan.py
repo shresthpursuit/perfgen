@@ -33,7 +33,7 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
-from perfgen.correlate.models import Candidate, Rejection, ScanResult
+from perfgen.correlate.models import Candidate, Rejection, ScanResult, UnreadableBody
 from perfgen.probe.records import ProbeRecord, RecordedCall
 from perfgen.probe.redact import REDACTED
 
@@ -80,18 +80,35 @@ def _walk_json(node: Any, path: str, out: list[tuple[str, str]]) -> None:
         out.append((path, str(node)))
 
 
-def response_values(call: RecordedCall) -> list[tuple[str, str, str]]:
-    """Every scalar a response produced, as (kind, location, value)."""
+def response_values(
+    call: RecordedCall,
+) -> tuple[list[tuple[str, str, str]], UnreadableBody | None]:
+    """Every scalar a response produced, as (kind, location, value).
+
+    Returns whatever could be indexed plus, when a non-empty body would not parse, a record
+    saying so. The body indexer only understands JSON; silently returning nothing for anything
+    else made an unreadable response indistinguishable from one that genuinely held no
+    correlations.
+    """
     if call.response is None:
-        return []
+        return [], None
 
     found: list[tuple[str, str, str]] = []
+    unreadable: UnreadableBody | None = None
 
     if call.response.body:
         try:
             payload = json.loads(call.response.body)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as exc:
             payload = None
+            unreadable = UnreadableBody(
+                step_name=call.name,
+                flow_id=call.flow_id,
+                step_index=call.step_index,
+                content_type=_content_type(call),
+                body_bytes=len(call.response.body),
+                parse_error=str(exc),
+            )
         if payload is not None:
             leaves: list[tuple[str, str]] = []
             _walk_json(payload, "$", leaves)
@@ -105,7 +122,17 @@ def response_values(call: RecordedCall) -> list[tuple[str, str, str]]:
         if value and value != REDACTED:
             found.append(("cookie", name, value))
 
-    return found
+    return found, unreadable
+
+
+def _content_type(call: RecordedCall) -> str:
+    """The declared Content-Type, which is what a reader needs to know to act on this."""
+    if call.response is None:
+        return ""
+    for name, value in call.response.headers.items():
+        if name.strip().lower() == "content-type":
+            return value.split(";")[0].strip()
+    return ""
 
 
 def request_text(call: RecordedCall) -> dict[str, str]:
@@ -180,8 +207,10 @@ def find_candidates(record: ProbeRecord) -> ScanResult:
     appearances: dict[str, set[int]] = {}
     indexed: list[list[tuple[str, str, str]]] = []
     for position, call in enumerate(calls):
-        values = response_values(call)
+        values, unreadable = response_values(call)
         indexed.append(values)
+        if unreadable is not None:
+            result.unreadable.append(unreadable)
         for _, _, value in values:
             appearances.setdefault(value, set()).add(position)
 

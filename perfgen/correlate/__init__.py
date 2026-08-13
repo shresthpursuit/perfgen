@@ -2,7 +2,13 @@
 
 from perfgen.correlate.adjudicate import Adjudicator, ClaudeAdjudicator, build_prompt
 from perfgen.correlate.engine import CorrelationOutcome, correlate
-from perfgen.correlate.models import Adjudication, AdjudicationResult, Candidate, ScanResult
+from perfgen.correlate.models import (
+    Adjudication,
+    AdjudicationResult,
+    Candidate,
+    ScanResult,
+    UnreadableBody,
+)
 from perfgen.correlate.scan import find_candidates
 
 __all__ = [
@@ -13,6 +19,7 @@ __all__ = [
     "ClaudeAdjudicator",
     "CorrelationOutcome",
     "ScanResult",
+    "UnreadableBody",
     "build_prompt",
     "correlate",
     "find_candidates",

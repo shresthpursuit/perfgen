@@ -13,7 +13,7 @@ import pytest
 from perfgen.correlate import build_prompt, correlate, find_candidates
 from perfgen.correlate.adjudicate import parse_response
 from perfgen.correlate.models import Adjudication, AdjudicationResult, Candidate
-from perfgen.correlate.scan import low_entropy_reason
+from perfgen.correlate.scan import low_entropy_reason, response_values
 from perfgen.ir.models import (
     Application,
     Auth,
@@ -225,6 +225,116 @@ def test_the_server_generated_sibling_of_an_echoed_value_still_survives():
     result = find_candidates(bait_record())
     assert REAL_REQUEST_REF in values_of(result)
     assert ECHOED_CLIENT_VALUE not in values_of(result)
+
+
+# --------------------------------------------------------------------------------------------
+# A body the scan cannot read must say so
+#
+# The body indexer only understands JSON. An XML or form-encoded response used to contribute
+# nothing and produce no rejection either, so the run reported "0 candidates, 0 rejected" - which
+# reads as "there was nothing there" when it actually meant "I could not look".
+# --------------------------------------------------------------------------------------------
+
+XML_REF = "ORD-8f2c91ab-7d3e"
+
+
+def xml_body_record() -> ProbeRecord:
+    """A high-entropy reference carried in an XML body into a later request's path."""
+    return ProbeRecord(
+        application="Xml",
+        performed_at="2026-08-11T00:00:00Z",
+        calls=[
+            RecordedCall(
+                flow_id="F01",
+                step_index=1,
+                name="Create order",
+                request=RecordedRequest(method="POST", url="https://api.example.internal/orders"),
+                response=RecordedResponse(
+                    status=201,
+                    headers={"Content-Type": "application/xml; charset=utf-8"},
+                    body=f"<order><ref>{XML_REF}</ref></order>",
+                ),
+            ),
+            RecordedCall(
+                flow_id="F01",
+                step_index=2,
+                name="Fetch order",
+                request=RecordedRequest(
+                    method="GET", url=f"https://api.example.internal/orders/{XML_REF}"
+                ),
+                response=RecordedResponse(status=200, body="<order/>"),
+            ),
+        ],
+    )
+
+
+def test_an_unreadable_body_is_recorded_rather_than_ignored():
+    result = find_candidates(xml_body_record())
+
+    assert result.unreadable, "an XML body must leave a trace, not vanish"
+    entry = result.unreadable[0]
+    assert entry.step_name == "Create order"
+    assert entry.content_type == "application/xml"
+    assert entry.body_bytes > 0
+
+
+def test_the_scan_summary_no_longer_reads_as_nothing_was_there():
+    """'0 candidates, 0 rejected' alone is indistinguishable from a clean empty result."""
+    summary = find_candidates(xml_body_record()).summary
+
+    assert "0 candidate(s) survived" in summary
+    assert "unreadable" in summary
+
+
+def test_the_unreadable_body_names_where_it_came_from():
+    entry = find_candidates(xml_body_record()).unreadable[0]
+    described = entry.describe()
+
+    assert "F01 step 1" in described
+    assert "Create order" in described
+    assert "application/xml" in described
+
+
+def test_an_unreadable_body_surfaces_as_a_warning():
+    outcome = correlate(build_ir(), xml_body_record(), FakeAdjudicator())
+
+    warning = next(w for w in outcome.warnings if "could not be read" in w)
+    assert "application/xml" in warning
+    assert "Only JSON response bodies are indexed" in warning
+    assert "has been missed" in warning
+
+
+def test_a_json_body_produces_no_unreadable_entry():
+    assert find_candidates(bait_record()).unreadable == []
+    assert "unreadable" not in find_candidates(bait_record()).summary
+
+
+def test_an_empty_body_is_not_reported_as_unreadable():
+    """Nothing to read is not the same as failing to read something."""
+    record = xml_body_record()
+    record.calls[0].response.body = ""
+    record.calls[1].response.body = ""
+    assert find_candidates(record).unreadable == []
+
+
+def test_headers_are_still_indexed_when_the_body_is_unreadable():
+    """A failed body must not cost us the parts that did parse."""
+    values, unreadable = response_values(xml_body_record().calls[0])
+
+    assert unreadable is not None
+    assert any(kind == "response_header" for kind, _, _ in values)
+
+
+def test_a_json_body_with_the_wrong_content_type_still_parses():
+    """Indexing is driven by the bytes, not the label, so a mislabelled body is not lost."""
+    record = xml_body_record()
+    record.calls[0].response.headers = {"Content-Type": "text/plain"}
+    record.calls[0].response.body = json.dumps({"ref": XML_REF})
+
+    result = find_candidates(record)
+
+    assert XML_REF in values_of(result), "a JSON body labelled text/plain must still be indexed"
+    assert not [u for u in result.unreadable if u.step_name == "Create order"]
 
 
 # --------------------------------------------------------------------------------------------

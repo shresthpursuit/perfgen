@@ -75,16 +75,46 @@ class Rejection(_Base):
     used_step_name: str
 
 
+class UnreadableBody(_Base):
+    """A response whose body the scan could not index.
+
+    Distinct from a `Rejection`, which is a judgement about a candidate the scan found. This is
+    the scan admitting it could not look: nothing was examined, so nothing could be rejected
+    either. Without it, "0 candidates, 0 rejected" reads as "there was nothing there" when it may
+    mean "I could not read this".
+    """
+
+    step_name: str
+    flow_id: str | None = None
+    step_index: int | None = None
+    content_type: str = Field(default="", description="as the server declared it, if at all")
+    body_bytes: int = 0
+    parse_error: str = ""
+
+    def describe(self) -> str:
+        where = (
+            f"{self.flow_id} step {self.step_index} ({self.step_name})"
+            if self.flow_id
+            else self.step_name
+        )
+        kind = self.content_type or "no Content-Type declared"
+        return f"{where}: {self.body_bytes}-byte {kind} body could not be parsed as JSON"
+
+
 class ScanResult(_Base):
     candidates: list[Candidate] = Field(default_factory=list)
     rejected: list[Rejection] = Field(default_factory=list)
+    unreadable: list[UnreadableBody] = Field(default_factory=list)
 
     @property
     def summary(self) -> str:
-        return (
+        text = (
             f"{len(self.candidates)} candidate(s) survived, "
             f"{len(self.rejected)} rejected by the filters"
         )
+        if self.unreadable:
+            text += f", {len(self.unreadable)} response body/bodies unreadable"
+        return text
 
 
 class Adjudication(_Base):

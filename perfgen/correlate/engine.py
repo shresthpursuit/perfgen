@@ -58,6 +58,7 @@ def correlate(
 
     scan = find_candidates(record)
     outcome = CorrelationOutcome(scan=scan, adjudication=AdjudicationResult())
+    _warn_about_unreadable_bodies(scan, outcome)
 
     if not scan.candidates:
         outcome.skip_reason = (
@@ -153,6 +154,28 @@ def _expression_for(candidate: Candidate, decision: Adjudication) -> str:
         return f'"{re.escape(candidate.source_location.rsplit(".", 1)[-1])}"\\s*:\\s*"([^"]+)"'
     left, _, right = candidate.used_detail.partition(candidate.value)
     return f"{left[-12:]}||{right[:12]}" if left or right else "||"
+
+
+def _warn_about_unreadable_bodies(scan: ScanResult, outcome: CorrelationOutcome) -> None:
+    """Say when the scan could not read a response, rather than reporting an empty result.
+
+    The body indexer only understands JSON. An XML or form-encoded response yields no candidates
+    and no rejections, which looks exactly like a run where there was genuinely nothing to
+    correlate - so any correlation in that response is missed with nothing to show for it.
+    """
+    if not scan.unreadable:
+        return
+
+    detail = "; ".join(entry.describe() for entry in scan.unreadable[:5])
+    if len(scan.unreadable) > 5:
+        detail += f"; and {len(scan.unreadable) - 5} more"
+
+    outcome.warnings.append(
+        f"{len(scan.unreadable)} response body/bodies could not be read, so nothing in them was "
+        f"searched for correlations. Only JSON response bodies are indexed today. "
+        f"Any value carried out of these responses into a later request has been missed, and "
+        f"the counts above do not account for it. {detail}."
+    )
 
 
 def _placeholder_names(record: ProbeRecord) -> dict[tuple[str, int, str], str]:
