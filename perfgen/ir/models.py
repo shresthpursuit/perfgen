@@ -68,6 +68,7 @@ class Source(StrEnum):
 
 class ExtractorType(StrEnum):
     JSON_PATH = "json_path"
+    XPATH = "xpath"
     REGEX = "regex"
     BOUNDARY = "boundary"
     HEADER = "header"

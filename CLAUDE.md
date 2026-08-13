@@ -30,6 +30,9 @@ stage writes its artifact to disk before the next reads it: `perfgen run` does a
 - **Deleting stale artifacts under `outputs/` needs no check-in** — gitignored, regenerates
   deterministically. `outputs/` only; ask first for anything else. `tests/fixtures/ir/` and
   `tests/fixtures/golden/` are permanent fixtures the suite depends on, never scratch.
+- **Always write commit messages to a file and use `git commit -F <file>`.** Never `-m` with
+  inline quoting: `@'...'` is PowerShell here-string syntax and is passed through literally by
+  bash, which has twice produced a commit titled `@x`. A message file has no quoting to get wrong.
 
 ## Amendments to the brief (authoritative where they conflict)
 

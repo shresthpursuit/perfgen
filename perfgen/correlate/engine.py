@@ -145,13 +145,23 @@ def _write_extract(
 
 
 def _expression_for(candidate: Candidate, decision: Adjudication) -> str:
-    """The extractor expression, taken from where the scan actually found the value."""
-    if decision.extractor is ExtractorType.JSON_PATH:
+    """The extractor expression, taken from where the scan actually found the value.
+
+    For JSON and XML the location already *is* an expression - a JSONPath or an XPath - which is
+    why the body walkers produce them in that form. Form-encoded bodies have no JMeter extractor
+    of their own, so the parameter name is turned into a regex here instead.
+    """
+    if decision.extractor in (ExtractorType.JSON_PATH, ExtractorType.XPATH, ExtractorType.HEADER):
         return candidate.source_location
-    if decision.extractor is ExtractorType.HEADER:
-        return candidate.source_location
+
     if decision.extractor is ExtractorType.REGEX:
+        if candidate.body_format == "form":
+            # `clientRef` -> `clientRef=([^&]*)`. Regex rather than a boundary extractor because
+            # the last parameter in a body has no trailing & for a right boundary to anchor on.
+            name = candidate.source_location.split("[")[0]
+            return f"{re.escape(name)}=([^&]*)"
         return f'"{re.escape(candidate.source_location.rsplit(".", 1)[-1])}"\\s*:\\s*"([^"]+)"'
+
     left, _, right = candidate.used_detail.partition(candidate.value)
     return f"{left[-12:]}||{right[:12]}" if left or right else "||"
 
@@ -163,6 +173,14 @@ def _warn_about_unreadable_bodies(scan: ScanResult, outcome: CorrelationOutcome)
     and no rejections, which looks exactly like a run where there was genuinely nothing to
     correlate - so any correlation in that response is missed with nothing to show for it.
     """
+    if scan.mismatches:
+        outcome.warnings.append(
+            "Response body/bodies did not match their declared Content-Type: "
+            + "; ".join(scan.mismatches[:5])
+            + ". They were indexed by what they actually contain, which is why the extractor "
+            "type may not be the one the header implies."
+        )
+
     if not scan.unreadable:
         return
 
@@ -172,9 +190,9 @@ def _warn_about_unreadable_bodies(scan: ScanResult, outcome: CorrelationOutcome)
 
     outcome.warnings.append(
         f"{len(scan.unreadable)} response body/bodies could not be read, so nothing in them was "
-        f"searched for correlations. Only JSON response bodies are indexed today. "
-        f"Any value carried out of these responses into a later request has been missed, and "
-        f"the counts above do not account for it. {detail}."
+        f"searched for correlations. JSON, XML and form-encoded bodies are indexed; anything "
+        f"else is not. Any value carried out of these responses into a later request has been "
+        f"missed, and the counts above do not account for it. {detail}."
     )
 
 

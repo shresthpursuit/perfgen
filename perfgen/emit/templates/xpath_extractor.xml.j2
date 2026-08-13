@@ -1,0 +1,12 @@
+{# Property names are XPathExtractor2.* despite the class being XPath2Extractor - read out of the
+   shipped ApacheJMeter_components.jar rather than guessed. Namespaces are handled inside the
+   query itself via local-name(), so the namespaces field stays empty and there is no prefix
+   binding to keep in step with the document. #}
+<XPath2Extractor guiclass="XPath2ExtractorGui" testclass="XPath2Extractor" testname="{{ testname }}" enabled="true">
+  <stringProp name="XPathExtractor2.refname">{{ var }}</stringProp>
+  <stringProp name="XPathExtractor2.xpathQuery">{{ expr }}</stringProp>
+  <stringProp name="XPathExtractor2.namespaces"></stringProp>
+  <stringProp name="XPathExtractor2.default">{{ default_value }}</stringProp>
+  <boolProp name="XPathExtractor2.fragment">false</boolProp>
+  <intProp name="XPathExtractor2.matchNumber">1</intProp>
+</XPath2Extractor>

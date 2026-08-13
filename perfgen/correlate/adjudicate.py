@@ -37,8 +37,11 @@ For each candidate, decide:
 - accept: true if the later request genuinely depends on the value the earlier response produced.
   false if it is a coincidence, a constant, or something the client would send anyway.
 - var: a short camelCase variable name describing the value (itemId, requestRef, sessionToken).
-- extractor: json_path when the value came from a JSON response body, header when it came from a
-  response header, regex or boundary only when neither fits.
+- extractor: match it to the body the value came from. json_path for a JSON body, xpath for an
+  XML body (the location given is already a valid XPath), regex for a form-encoded body, header
+  when the value came from a response header. boundary only when none of those fit. Choosing an
+  extractor that cannot read the format it is pointed at produces a script that runs and extracts
+  nothing.
 - scope: iteration for values re-fetched every pass through a flow, which is almost all record
   identifiers. thread for values established once per virtual user, such as a session. global for
   values shared by every user, such as a single shared auth token.
@@ -92,6 +95,7 @@ def build_prompt(candidates: list[Candidate]) -> str:
         )
         lines.append(
             f"  found in:         {candidate.source_kind} at {candidate.source_location}"
+            + (f" (a {candidate.body_format} body)" if candidate.body_format else "")
         )
         lines.append(
             f"  reused by:        {candidate.used_step_name} "

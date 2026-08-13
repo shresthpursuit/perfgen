@@ -28,11 +28,11 @@ filter keeps running at full strength.
 
 from __future__ import annotations
 
-import json
 import re
-from typing import Any
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from perfgen.correlate.bodies import FALLBACK_ORDER, parse_body
 from perfgen.correlate.models import Candidate, Rejection, ScanResult, UnreadableBody
 from perfgen.probe.records import ProbeRecord, RecordedCall
 from perfgen.probe.redact import REDACTED
@@ -67,52 +67,45 @@ _FLOAT = re.compile(r"^-?\d+\.\d+$")
 # --------------------------------------------------------------------------------------------
 
 
-def _walk_json(node: Any, path: str, out: list[tuple[str, str]]) -> None:
-    if isinstance(node, dict):
-        for key, value in node.items():
-            _walk_json(value, f"{path}.{key}", out)
-    elif isinstance(node, list):
-        for index, value in enumerate(node):
-            _walk_json(value, f"{path}[{index}]", out)
-    elif isinstance(node, bool) or node is None:
-        return  # booleans and nulls are never identifiers
-    elif isinstance(node, str | int | float):
-        out.append((path, str(node)))
+@dataclass
+class IndexedResponse:
+    """What one response contributed, and what it cost us if anything."""
+
+    values: list[tuple[str, str, str]] = field(default_factory=list)
+    unreadable: UnreadableBody | None = None
+    body_format: str = ""
+    mismatch: str | None = None
 
 
-def response_values(
-    call: RecordedCall,
-) -> tuple[list[tuple[str, str, str]], UnreadableBody | None]:
+def response_values(call: RecordedCall) -> IndexedResponse:
     """Every scalar a response produced, as (kind, location, value).
 
-    Returns whatever could be indexed plus, when a non-empty body would not parse, a record
-    saying so. The body indexer only understands JSON; silently returning nothing for anything
-    else made an unreadable response indistinguishable from one that genuinely held no
-    correlations.
+    Returns whatever could be indexed plus, when a non-empty body no parser could read, a record
+    saying so - an unreadable response must not look like one that genuinely held nothing.
     """
     if call.response is None:
-        return [], None
+        return IndexedResponse()
 
     found: list[tuple[str, str, str]] = []
     unreadable: UnreadableBody | None = None
+    body_format = ""
+    mismatch: str | None = None
 
     if call.response.body:
-        try:
-            payload = json.loads(call.response.body)
-        except (ValueError, TypeError) as exc:
-            payload = None
+        parsed = parse_body(call.response.body, _content_type(call))
+        if parsed is None:
             unreadable = UnreadableBody(
                 step_name=call.name,
                 flow_id=call.flow_id,
                 step_index=call.step_index,
                 content_type=_content_type(call),
                 body_bytes=len(call.response.body),
-                parse_error=str(exc),
+                parse_error=f"none of {', '.join(FALLBACK_ORDER)} could read it",
             )
-        if payload is not None:
-            leaves: list[tuple[str, str]] = []
-            _walk_json(payload, "$", leaves)
-            found.extend(("response_body", path, value) for path, value in leaves)
+        else:
+            body_format = parsed.format
+            mismatch = parsed.mismatch
+            found.extend(("response_body", path, value) for path, value in parsed.leaves)
 
     for name, value in call.response.headers.items():
         if value and value != REDACTED:
@@ -122,7 +115,9 @@ def response_values(
         if value and value != REDACTED:
             found.append(("cookie", name, value))
 
-    return found, unreadable
+    return IndexedResponse(
+        values=found, unreadable=unreadable, body_format=body_format, mismatch=mismatch
+    )
 
 
 def _content_type(call: RecordedCall) -> str:
@@ -206,12 +201,16 @@ def find_candidates(record: ProbeRecord) -> ScanResult:
     # How many distinct responses each value came back from, for the ubiquity check.
     appearances: dict[str, set[int]] = {}
     indexed: list[list[tuple[str, str, str]]] = []
+    formats: dict[int, str] = {}
     for position, call in enumerate(calls):
-        values, unreadable = response_values(call)
-        indexed.append(values)
-        if unreadable is not None:
-            result.unreadable.append(unreadable)
-        for _, _, value in values:
+        response = response_values(call)
+        indexed.append(response.values)
+        formats[position] = response.body_format
+        if response.unreadable is not None:
+            result.unreadable.append(response.unreadable)
+        if response.mismatch is not None:
+            result.mismatches.append(f"{call.name}: {response.mismatch}")
+        for _, _, value in response.values:
             appearances.setdefault(value, set()).add(position)
 
     next_id = 1
@@ -284,6 +283,7 @@ def find_candidates(record: ProbeRecord) -> ScanResult:
                         used_kind=used_kind,
                         used_detail=used_detail,
                         declared_placeholder=declared,
+                        body_format=formats.get(source_position, ""),
                     )
                 )
                 next_id += 1

@@ -129,7 +129,7 @@ class Redactor:
             except (ValueError, TypeError):
                 pass
 
-        if "form-urlencoded" in kind or _looks_form_encoded(body):
+        if "form-urlencoded" in kind or looks_form_encoded(body):
             try:
                 pairs = parse_qsl(body, keep_blank_values=True)
                 if pairs:
@@ -160,5 +160,5 @@ def _redact_json(node):
 _FORM_PAIR = re.compile(r"^[^=&\s]+=[^&]*(&[^=&\s]+=[^&]*)*$")
 
 
-def _looks_form_encoded(body: str) -> bool:
+def looks_form_encoded(body: str) -> bool:
     return bool(_FORM_PAIR.match(body.strip()))

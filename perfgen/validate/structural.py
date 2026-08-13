@@ -34,7 +34,10 @@ _EXTRACTOR_REFNAME = {
     "JSONPostProcessor": "JSONPostProcessor.referenceNames",
     "RegexExtractor": "RegexExtractor.refname",
     "BoundaryExtractor": "BoundaryExtractor.refname",
-    "XPath2Extractor": "XPathExtractor.refname",
+    # Note the "2": JMeter's XPath2Extractor names its properties XPathExtractor2.*, not
+    # XPath2Extractor.*. Read out of the shipped class rather than guessed - an earlier guess here
+    # was wrong, and the cost of being wrong is a variable the validator cannot see is produced.
+    "XPath2Extractor": "XPathExtractor2.refname",
 }
 
 

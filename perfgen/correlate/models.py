@@ -48,6 +48,10 @@ class Candidate(_Base):
             "A declared dependency rather than a coincidental string match."
         ),
     )
+    body_format: str = Field(
+        default="",
+        description="json, xml or form - decides which extractor can read the location back",
+    )
 
     @property
     def same_flow(self) -> bool:
@@ -105,6 +109,14 @@ class ScanResult(_Base):
     candidates: list[Candidate] = Field(default_factory=list)
     rejected: list[Rejection] = Field(default_factory=list)
     unreadable: list[UnreadableBody] = Field(default_factory=list)
+    mismatches: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Responses whose body parsed as something other than their declared Content-Type. "
+            "Worth surfacing: it explains an unexpected extractor type, and a server misreporting "
+            "its own content type is something a reader should know."
+        ),
+    )
 
     @property
     def summary(self) -> str:

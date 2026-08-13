@@ -46,23 +46,29 @@ from tests.fixtures.traffic import (
 class FakeAdjudicator:
     """Records what it was asked and answers from a script."""
 
-    def __init__(self, decisions: list[Adjudication] | None = None):
+    def __init__(
+        self,
+        decisions: list[Adjudication] | None = None,
+        extractor: ExtractorType = ExtractorType.JSON_PATH,
+    ):
         self.calls: list[list[Candidate]] = []
         self.decisions = decisions
+        self.extractor = extractor
 
     def adjudicate(self, candidates):
         self.calls.append(list(candidates))
         if self.decisions is not None:
             return AdjudicationResult(decisions=self.decisions, model="fake")
-        # Default: accept everything, naming the variable after the JSON field.
+        # Default: accept everything, naming the variable after the final path segment.
         return AdjudicationResult(
             model="fake",
             decisions=[
                 Adjudication(
                     candidate_id=c.id,
                     accept=True,
-                    var=c.source_location.rsplit(".", 1)[-1].split("[")[0] or f"v{c.id}",
-                    extractor=ExtractorType.JSON_PATH,
+                    var=c.source_location.rsplit(".", 1)[-1].rsplit("/", 1)[-1].split("[")[0]
+                    or f"v{c.id}",
+                    extractor=self.extractor,
                     scope=Scope.ITERATION,
                     evidence=f"observed at {c.source_location}",
                 )
@@ -268,40 +274,74 @@ def xml_body_record() -> ProbeRecord:
     )
 
 
-def test_an_unreadable_body_is_recorded_rather_than_ignored():
-    result = find_candidates(xml_body_record())
+def prose_body_record() -> ProbeRecord:
+    """A body no parser can read: not JSON, not well-formed XML, not key=value pairs."""
+    record = xml_body_record()
+    record.calls[0].response.headers = {"Content-Type": "text/plain"}
+    record.calls[0].response.body = "Service Unavailable - please retry shortly"
+    record.calls[1].response.body = "Service Unavailable - please retry shortly"
+    return record
 
-    assert result.unreadable, "an XML body must leave a trace, not vanish"
+
+def test_an_unreadable_body_is_recorded_rather_than_ignored():
+    result = find_candidates(prose_body_record())
+
+    assert result.unreadable, "an unparseable body must leave a trace, not vanish"
     entry = result.unreadable[0]
     assert entry.step_name == "Create order"
-    assert entry.content_type == "application/xml"
+    assert entry.content_type == "text/plain"
     assert entry.body_bytes > 0
 
 
 def test_the_scan_summary_no_longer_reads_as_nothing_was_there():
     """'0 candidates, 0 rejected' alone is indistinguishable from a clean empty result."""
-    summary = find_candidates(xml_body_record()).summary
+    summary = find_candidates(prose_body_record()).summary
 
     assert "0 candidate(s) survived" in summary
     assert "unreadable" in summary
 
 
 def test_the_unreadable_body_names_where_it_came_from():
-    entry = find_candidates(xml_body_record()).unreadable[0]
+    entry = find_candidates(prose_body_record()).unreadable[0]
     described = entry.describe()
 
     assert "F01 step 1" in described
     assert "Create order" in described
-    assert "application/xml" in described
+    assert "text/plain" in described
 
 
 def test_an_unreadable_body_surfaces_as_a_warning():
-    outcome = correlate(build_ir(), xml_body_record(), FakeAdjudicator())
+    outcome = correlate(build_ir(), prose_body_record(), FakeAdjudicator())
 
     warning = next(w for w in outcome.warnings if "could not be read" in w)
-    assert "application/xml" in warning
-    assert "Only JSON response bodies are indexed" in warning
+    assert "text/plain" in warning
     assert "has been missed" in warning
+
+
+# --- Stage 2: XML and form bodies are now indexed rather than reported unreadable -------------
+
+
+def test_an_xml_body_is_now_indexed():
+    result = find_candidates(xml_body_record())
+
+    assert result.unreadable == [], "XML is readable now"
+    assert XML_REF in values_of(result)
+
+
+def test_an_xml_candidate_carries_an_xpath_location_and_its_format():
+    candidate = next(c for c in find_candidates(xml_body_record()).candidates if c.value == XML_REF)
+
+    assert candidate.source_location == "/order/ref"
+    assert candidate.body_format == "xml"
+
+
+def test_an_xml_correlation_becomes_an_xpath_extractor():
+    ir = build_ir()
+    correlate(ir, xml_body_record(), FakeAdjudicator(extractor=ExtractorType.XPATH))
+
+    extract = ir.flow("F01").steps[0].extracts[0]
+    assert extract.extractor is ExtractorType.XPATH
+    assert extract.expr == "/order/ref", "the location must survive as the XPath query"
 
 
 def test_a_json_body_produces_no_unreadable_entry():
@@ -319,10 +359,10 @@ def test_an_empty_body_is_not_reported_as_unreadable():
 
 def test_headers_are_still_indexed_when_the_body_is_unreadable():
     """A failed body must not cost us the parts that did parse."""
-    values, unreadable = response_values(xml_body_record().calls[0])
+    indexed = response_values(prose_body_record().calls[0])
 
-    assert unreadable is not None
-    assert any(kind == "response_header" for kind, _, _ in values)
+    assert indexed.unreadable is not None
+    assert any(kind == "response_header" for kind, _, _ in indexed.values)
 
 
 def test_a_json_body_with_the_wrong_content_type_still_parses():

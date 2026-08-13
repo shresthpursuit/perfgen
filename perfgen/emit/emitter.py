@@ -141,6 +141,14 @@ def _extractor_node(extract: Extract, scopes: dict[str, Scope]) -> list[Node]:
             expr=extract.expr,
             default_value=EXTRACT_DEFAULT,
         )
+    elif extract.extractor is ExtractorType.XPATH:
+        element = node(
+            "xpath_extractor",
+            testname=testname,
+            var=extract.var,
+            expr=extract.expr,
+            default_value=EXTRACT_DEFAULT,
+        )
     elif extract.extractor is ExtractorType.REGEX:
         element = node(
             "regex_extractor",
