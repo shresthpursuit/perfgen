@@ -52,6 +52,14 @@ class RecordedCall(_Base):
             "the correlation engine decides what actually becomes an extractor."
         ),
     )
+    fallback_bindings: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Which of those bindings came from the preceding step's generic `id` rather than a "
+            "field whose name actually matched. A weaker piece of evidence, kept distinguishable "
+            "so it can be said so in the extractor's evidence rather than blending in."
+        ),
+    )
 
     @property
     def succeeded(self) -> bool:

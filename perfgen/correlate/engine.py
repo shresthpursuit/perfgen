@@ -79,6 +79,7 @@ def correlate(
     by_id = {candidate.id: candidate for candidate in scan.candidates}
     probe_observed = not record.degraded
     placeholders = _placeholder_names(record)
+    weak = _fallback_placeholders(record)
 
     for decision in outcome.adjudication.accepted():
         candidate = by_id.get(decision.candidate_id)
@@ -93,6 +94,19 @@ def correlate(
         )
         if spec_name:
             decision = decision.model_copy(update={"var": spec_name})
+            if (candidate.used_flow_id, candidate.used_step_index, spec_name) in weak:
+                # Say which kind of binding this was. "verified" here means the traffic was
+                # observed, not that the name matched - and a reviewer chasing a wrong value
+                # should not have to reconstruct that distinction from the probe record.
+                decision = decision.model_copy(
+                    update={
+                        "evidence": (
+                            f"{decision.evidence} The probe filled {{{spec_name}}} from the "
+                            f"preceding step's generic 'id' field, not from a field whose name "
+                            f"matched - check it addresses the right resource."
+                        ).strip()
+                    }
+                )
 
         if _write_extract(ir, candidate, decision, probe_observed):
             outcome.extracts_written += 1
@@ -194,6 +208,17 @@ def _warn_about_unreadable_bodies(scan: ScanResult, outcome: CorrelationOutcome)
         f"else is not. Any value carried out of these responses into a later request has been "
         f"missed, and the counts above do not account for it. {detail}."
     )
+
+
+def _fallback_placeholders(record: ProbeRecord) -> set[tuple[str, int, str]]:
+    """Bindings the probe made from the preceding step's generic `id`, not from a matching name."""
+    weak: set[tuple[str, int, str]] = set()
+    for call in record.calls:
+        if call.flow_id is None or call.step_index is None:
+            continue
+        for placeholder in call.fallback_bindings:
+            weak.add((call.flow_id, call.step_index, placeholder))
+    return weak
 
 
 def _placeholder_names(record: ProbeRecord) -> dict[tuple[str, int, str], str]:

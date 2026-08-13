@@ -49,6 +49,12 @@ stage writes its artifact to disk before the next reads it: `perfgen run` does a
 - **The run summary leads with what was guessed**, not what worked: count, ratio, and each flagged
   extractor's evidence, above the detail. A wrong correlation does not crash — the script runs,
   passes and measures nothing — so it must be caught by reading, before the run.
+- **The probe's placeholder fallback is scoped to the adjacent step.** Exact field-name match
+  first, separators ignored (`user_id` == `{userId}`); otherwise the *immediately preceding*
+  step's bare `id`, and nothing further back. Searching everything seen so far sent a category id
+  to a users endpoint on a real Twitch run. Fallback-derived bindings are marked as such and say
+  so in the extractor's evidence. Pinned by
+  `test_a_value_two_steps_back_never_satisfies_a_later_placeholder`.
 - **A `{placeholder}` must never reach the script unresolved.** Any route ending without an
   adjudicated correlation falls back to a labelled guess; the spec's placeholder name beats the
   model's chosen variable name.

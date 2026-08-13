@@ -315,10 +315,11 @@ def _run_flow(
     token: str | None,
 ) -> None:
     # Values seen so far in this flow's responses, so a later step's {placeholder} can be filled.
-    seen: dict[str, tuple[str, str]] = {}  # lowercased key -> (value, json path)
+    seen: dict[str, tuple[str, str]] = {}  # normalised key -> (value, json path), whole flow
+    preceding: dict[str, tuple[str, str]] = {}  # the immediately previous response, alone
 
     for step in flow.steps:
-        path, bindings, unresolved = _resolve_path(step.path, seen)
+        path, bindings, fallback, unresolved = _resolve_path(step.path, seen, preceding)
         url = f"{base}{path}"
         headers = _step_headers(step, flow, ir, token)
 
@@ -333,6 +334,7 @@ def _run_flow(
                 body=redactor.body(step.body, step.content_type),
             ),
             placeholder_bindings=bindings,
+            fallback_bindings=fallback,
         )
 
         if unresolved:
@@ -364,7 +366,13 @@ def _run_flow(
                 f"Correlations found from here on are less trustworthy."
             )
 
-        _index_response(response, seen)
+        # Index this response twice: into the running `seen` for exact-name matches anywhere in
+        # the flow, and into a fresh `preceding` holding only this step, which is the sole source
+        # the bare-`id` fallback is allowed to draw on.
+        preceding = {}
+        _index_response(response, preceding)
+        for key, entry in preceding.items():
+            seen.setdefault(key, entry)
 
 
 def _step_headers(step: Step, flow: Flow, ir: TestPlanIR, token: str | None) -> dict[str, str]:
@@ -385,30 +393,51 @@ def _step_headers(step: Step, flow: Flow, ir: TestPlanIR, token: str | None) -> 
 
 
 def _resolve_path(
-    path: str, seen: dict[str, tuple[str, str]]
-) -> tuple[str, dict[str, str], list[str]]:
+    path: str,
+    seen: dict[str, tuple[str, str]],
+    preceding: dict[str, tuple[str, str]] | None = None,
+) -> tuple[str, dict[str, str], list[str], list[str]]:
     """Fill `{placeholder}` from an earlier response so the flow can actually be walked.
 
-    Matching is by name: `{itemId}` looks for a JSON key `itemId`, then `id`. This is a probe-time
-    hypothesis recorded as evidence, not a correlation decision - the correlation engine makes
-    those, from the traffic this produces.
+    Two rules, tried in order.
+
+    **Exact name, separators ignored.** `{userId}` finds a field spelled `user_id`, `userId` or
+    `USER-ID`, anywhere seen so far in the flow.
+
+    **Otherwise, the immediately preceding step's bare `id`** - and only that step's. A resource
+    endpoint answers with its own key called `id`, so `{gameId}` after a call to `/games` is the
+    one guess worth making. Bounding it to the adjacent step is what matters: the original version
+    searched everything seen so far, so `{userId}` at step 3 picked up a category id captured at
+    step 1 and sent it confidently to a users endpoint, while the real `user_id` sat unused in
+    step 2's response.
+
+    A fallback-derived binding is reported separately from an exact match, because the correlation
+    engine trusts bindings - they exempt a value from the low-entropy filter and override the
+    model's chosen variable name - and a reviewer should be able to tell the two apart.
     """
     bindings: dict[str, str] = {}
+    fallback: list[str] = []
     unresolved: list[str] = []
 
     def replace(match: re.Match[str]) -> str:
         name = match.group(1)
-        candidate = seen.get(name.lower())
-        if candidate is None and name.lower().endswith("id"):
-            candidate = seen.get("id")
+        key = normalise_field(name)
+
+        candidate = seen.get(key)
+        if candidate is None and key.endswith("id") and preceding is not None:
+            candidate = preceding.get("id")
+            if candidate is not None:
+                fallback.append(name)
+
         if candidate is None:
             unresolved.append(name)
             return match.group(0)
+
         value, json_path = candidate
         bindings[name] = json_path
         return value
 
-    return _PLACEHOLDER.sub(replace, path), bindings, unresolved
+    return _PLACEHOLDER.sub(replace, path), bindings, fallback, unresolved
 
 
 def _index_response(response: httpx.Response, seen: dict[str, tuple[str, str]]) -> None:
@@ -420,6 +449,16 @@ def _index_response(response: httpx.Response, seen: dict[str, tuple[str, str]]) 
     _walk(payload, "$", seen)
 
 
+def normalise_field(name: str) -> str:
+    """Compare field and placeholder names ignoring case and separators.
+
+    APIs answer in snake_case and specs are written in camelCase, so `user_id` and `{userId}` are
+    the same thing spelled two ways. Without this they never match, and the placeholder falls
+    through to whatever weaker rule sits behind it.
+    """
+    return re.sub(r"[^a-z0-9]+", "", name.strip().lower())
+
+
 def _walk(node: Any, path: str, seen: dict[str, tuple[str, str]]) -> None:
     if isinstance(node, dict):
         for key, value in node.items():
@@ -428,8 +467,10 @@ def _walk(node: Any, path: str, seen: dict[str, tuple[str, str]]) -> None:
         for index, value in enumerate(node):
             _walk(value, f"{path}[{index}]", seen)
     elif isinstance(node, str | int | float) and not isinstance(node, bool):
-        key = path.rsplit(".", 1)[-1].split("[")[0].lower()
+        key = normalise_field(path.rsplit(".", 1)[-1].split("[")[0])
         # First occurrence wins: the first `id` in a search result is the one a user would click.
+        # Note this holds across steps too, so an early generic `id` keeps the slot for the whole
+        # flow - preferring the nearest preceding step is a separate, known improvement.
         if key and key not in seen:
             seen[key] = (str(node), path)
 

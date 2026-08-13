@@ -471,6 +471,82 @@ def test_an_undeclared_short_value_is_still_rejected():
     assert "101" in rejected_values(result, "low_entropy")
 
 
+def twitch_shaped_record(binding: dict[str, str]) -> ProbeRecord:
+    """The Twitch shape: a category id captured early, reused where a user id was wanted.
+
+    `509658` is six characters and an integer under the small-integer threshold, so the
+    low-entropy filter rejects it on its own. A placeholder binding is the one thing that
+    overrides that - which is why a false binding is not a cosmetic error.
+    """
+    return ProbeRecord(
+        application="Twitch",
+        performed_at="2026-08-14T00:00:00Z",
+        calls=[
+            RecordedCall(
+                flow_id="F01",
+                step_index=1,
+                name="Look up a category",
+                request=RecordedRequest(method="GET", url="https://api.x/helix/games?name=Chat"),
+                response=RecordedResponse(
+                    status=200, body=json.dumps({"data": [{"id": "509658", "name": "Chat"}]})
+                ),
+            ),
+            RecordedCall(
+                flow_id="F01",
+                step_index=2,
+                name="Get a streamer's profile",
+                request=RecordedRequest(method="GET", url="https://api.x/helix/users?id=509658"),
+                response=RecordedResponse(status=200, body=json.dumps({"data": []})),
+                placeholder_bindings=binding,
+            ),
+        ],
+    )
+
+
+def test_a_false_binding_would_smuggle_a_low_entropy_value_past_the_filter():
+    """Establishes the stake: with the bad binding present, 509658 survives and is adjudicated.
+
+    This is what the probe used to record. It is asserted rather than assumed, so the test below
+    proves a real change and not a tautology.
+    """
+    result = find_candidates(twitch_shaped_record({"userId": "$.data[0].id"}))
+
+    assert "509658" in values_of(result)
+    assert "509658" not in rejected_values(result, "low_entropy")
+
+
+def test_without_the_false_binding_the_filter_rejects_it():
+    """And this is what the probe records now: no binding, so no exemption, so it is filtered."""
+    result = find_candidates(twitch_shaped_record({}))
+
+    assert "509658" not in values_of(result)
+    assert "509658" in rejected_values(result, "low_entropy")
+
+
+def test_the_fixed_probe_produces_no_binding_for_the_twitch_shape():
+    """Closes the loop: the scan is only safe because the probe no longer emits that binding.
+
+    `seen` carries the category id from an earlier step; `preceding` is the adjacent response,
+    which has no `id` of its own. The fallback may only draw on `preceding`, so nothing binds.
+    """
+    from perfgen.probe.runner import _resolve_path, _walk
+
+    seen: dict[str, tuple[str, str]] = {}
+    _walk({"data": [{"id": "509658", "name": "Chat"}]}, "$", seen)
+
+    preceding: dict[str, tuple[str, str]] = {}
+    _walk({"data": [{"title": "a stream with no identifiers"}]}, "$", preceding)
+
+    resolved, bindings, fallback, unresolved = _resolve_path(
+        "/helix/users?id={userId}", seen, preceding
+    )
+
+    assert bindings == {}, "the binding that caused the exemption is no longer produced"
+    assert fallback == []
+    assert unresolved == ["userId"]
+    assert "509658" not in resolved
+
+
 def test_a_declared_placeholder_does_not_excuse_a_client_echoed_value():
     """The exemption covers low entropy only; an echoed value is static whatever points at it."""
     record = bait_record()

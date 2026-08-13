@@ -64,9 +64,14 @@ class StubApi:
         if path.endswith("/token"):
             return httpx.Response(self.token_status, json=self.token_payload)
         if "/catalogue/search" in path:
+            # Deliberately carries BOTH a generic `id` and the `item_id` the next step wants,
+            # in that order - the shape that made the old fallback pick the wrong one.
             return httpx.Response(
                 200,
-                json={"results": [{"id": ITEM_ID, "name": "Widget"}], "total": 1},
+                json={
+                    "results": [{"id": "ROW-0001-generic", "item_id": ITEM_ID, "name": "Widget"}],
+                    "total": 1,
+                },
                 headers={"Set-Cookie": "session=super-secret-session"},
             )
         if "/catalogue/items/" in path:
@@ -197,13 +202,130 @@ def test_token_is_sent_on_subsequent_requests():
 
 
 def test_placeholder_is_filled_from_an_earlier_response():
-    """Without this the second step 404s and the run yields nothing for the correlator to read."""
+    """Without this the second step 404s and the run yields nothing for the correlator to read.
+
+    `{itemId}` must find `item_id` - matched across the camelCase/snake_case divide - and must not
+    settle for the generic `id` sitting first in the same response.
+    """
     api = StubApi()
     _, outcome = run(api)
 
     detail = next(c for c in outcome.record.calls if c.step_index == 2)
     assert detail.request.url.endswith(f"/catalogue/items/{ITEM_ID}")
+    assert detail.placeholder_bindings == {"itemId": "$.results[0].item_id"}
+    assert "ROW-0001-generic" not in detail.request.url
+
+
+def test_a_placeholder_with_no_matching_field_stays_unresolved_and_says_so():
+    """Loud beats plausible. A guess here is recorded as a binding, and a binding is trusted."""
+    ir = build_ir()
+    ir.flows[0].steps[1].path = "/catalogue/items/{somethingNobodyReturned}"
+
+    api = StubApi()
+    with api.client() as client:
+        outcome = run_probe(ir, client=client)
+
+    detail = next(c for c in outcome.record.calls if c.step_index == 2)
+    assert detail.placeholder_bindings == {}, "no binding may be invented"
+    assert "{somethingNobodyReturned}" in detail.request.url
+    assert any("somethingNobodyReturned" in w for w in outcome.warnings)
+
+
+def test_the_adjacent_step_generic_id_is_a_permitted_fallback():
+    """A resource endpoint answers with its own key called `id`, so this one guess is worth making.
+
+    It is recorded as a fallback binding rather than an exact match, so a reviewer can tell which
+    kind of evidence it rests on.
+    """
+    ir = build_ir(auth=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "search" in request.url.path:
+            return httpx.Response(200, json={"results": [{"id": "CATEGORY-509658"}]})
+        return httpx.Response(200, json={})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        outcome = run_probe(ir, client=client)
+
+    detail = next(c for c in outcome.record.calls if c.step_index == 2)
     assert detail.placeholder_bindings == {"itemId": "$.results[0].id"}
+    assert detail.fallback_bindings == ["itemId"], "must be marked as the weaker evidence"
+    assert "CATEGORY-509658" in detail.request.url
+
+
+# --------------------------------------------------------------------------------------------
+# Named regression: the defect that shipped, reproduced from the real Twitch run
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_value_two_steps_back_never_satisfies_a_later_placeholder():
+    """The exact shape of the bug found against Twitch's Helix API.
+
+    Step 1 returns a category `id` (509658). Step 2 legitimately uses it for `{gameId}` and
+    returns a stream carrying a real `user_id`. Step 3 asks for `{userId}`.
+
+    The original code searched everything seen so far for a bare `id`, so `{userId}` picked up the
+    category id from two steps back and asked the users endpoint for user 509658 - which returned
+    an empty result while the genuine user_id sat unused in step 2's response. Nothing failed
+    loudly; the wrong value was recorded as a binding and would have been trusted downstream.
+    """
+    ir = build_ir(auth=False)
+    flow = ir.flows[0]
+    flow.steps[0].path = "/games?name=chat"
+    flow.steps[1].path = "/streams?game_id={gameId}"
+    flow.steps.append(
+        Step(index=3, name="Get profile", method=Method.GET, path="/users?id={userId}",
+             expected_status=200)
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path, query = request.url.path, request.url.query.decode()
+        if "/games" in path:
+            return httpx.Response(200, json={"data": [{"id": "509658", "name": "Chat"}]})
+        if "/streams" in path:
+            assert "game_id=509658" in query, "the adjacent-step fallback should supply this"
+            return httpx.Response(
+                200, json={"data": [{"id": "317452230754", "user_id": "77827128"}]}
+            )
+        return httpx.Response(200, json={"data": []})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        outcome = run_probe(ir, client=client)
+
+    profile = next(c for c in outcome.record.calls if c.step_index == 3)
+
+    assert profile.placeholder_bindings == {"userId": "$.data[0].user_id"}
+    assert profile.fallback_bindings == [], "an exact field-name match, not a guess"
+    assert "id=77827128" in profile.request.url
+    assert "509658" not in profile.request.url, "the category id is two steps back and must not win"
+
+
+def test_with_no_matching_field_a_distant_value_is_still_refused():
+    """Same shape, but step 2 offers no user_id: the answer is unresolved, not the stale id."""
+    ir = build_ir(auth=False)
+    flow = ir.flows[0]
+    flow.steps[0].path = "/games?name=chat"
+    flow.steps[1].path = "/streams?game_id={gameId}"
+    flow.steps.append(
+        Step(index=3, name="Get profile", method=Method.GET, path="/users?id={userId}",
+             expected_status=200)
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/games" in request.url.path:
+            return httpx.Response(200, json={"data": [{"id": "509658"}]})
+        if "/streams" in request.url.path:
+            return httpx.Response(200, json={"data": [{"title": "no identifiers here"}]})
+        return httpx.Response(200, json={"data": []})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        outcome = run_probe(ir, client=client)
+
+    profile = next(c for c in outcome.record.calls if c.step_index == 3)
+    assert profile.placeholder_bindings == {}
+    assert "{userId}" in profile.request.url
+    assert "509658" not in profile.request.url
+    assert any("userId" in w for w in outcome.warnings)
 
 
 def test_every_call_is_recorded_with_its_response():
