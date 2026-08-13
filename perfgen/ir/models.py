@@ -11,6 +11,9 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+# Stamped into every IR but never read back: nothing validates it, and it has not been bumped for
+# the schema changes made so far (ExtractorType.XPATH being the first forward-only one). So it
+# records intent, not compatibility - do not rely on it to detect an IR from a newer build.
 SPEC_VERSION = 1
 
 
@@ -68,6 +71,10 @@ class Source(StrEnum):
 
 class ExtractorType(StrEnum):
     JSON_PATH = "json_path"
+    # Added after json_path/regex/boundary/header, so this is a forward-only change: an IR written
+    # by this version fails to load on a build that predates it, with pydantic reporting only
+    # "Input should be 'json_path', 'regex', 'boundary' or 'header'". That is diagnosable but says
+    # nothing about version skew, which matters when two checkouts of this tool sit side by side.
     XPATH = "xpath"
     REGEX = "regex"
     BOUNDARY = "boundary"
