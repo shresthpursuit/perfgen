@@ -53,6 +53,10 @@ stage writes its artifact to disk before the next reads it: `perfgen run` does a
   no such field; the CLI rejects `--temperature`). It prints a configuration warning rather than
   being silently dropped. `llm.model` does work.
 - `application.api_reference` is stored in the IR with no behaviour attached.
+- **Known noisy, deliberately unfixed:** the correlation scan reports every response body it cannot
+  parse as JSON, including HTML error pages from 5xx responses. On a flaky or half-broken API that
+  could bury the useful warnings. Revisit only if a real run proves it annoying — under-reporting
+  was the bug this replaced, and guessing which failures matter is worse than reporting them all.
 
 ## Non-goals — do not build, scaffold, stub, or leave hooks for
 
