@@ -56,6 +56,11 @@ stage writes its artifact to disk before the next reads it: `perfgen run` does a
   no such field; the CLI rejects `--temperature`). It prints a configuration warning rather than
   being silently dropped. `llm.model` does work.
 - `application.api_reference` is stored in the IR with no behaviour attached.
+- **`application.additional_headers` are literal only.** Sent on every flow request beside the auth
+  header, written into the script as-is, resolved from nowhere. Credential-sourced headers
+  (`X-Key: {perf-secret}`) are **deferred, not started**: they need secret resolution, probe-record
+  redaction, a `${__groovy(System.getenv(...))}` emission path and their own JMeter gate. There is
+  no partial hook for them, so the field means exactly one thing.
 - **Known noisy, deliberately unfixed:** the correlation scan reports every response body it cannot
   parse as JSON, including HTML error pages from 5xx responses. On a flaky or half-broken API that
   could bury the useful warnings. Revisit only if a real run proves it annoying — under-reporting

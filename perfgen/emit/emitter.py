@@ -415,7 +415,10 @@ def _flow_thread_group(
     # A group-level Header Manager applies to every sampler in the group, including the token
     # request — which would send an unresolved Authorization header to the auth endpoint. With
     # per-thread auth the header therefore rides on each step's sampler instead.
-    group_headers = dict(flow.headers)
+    # Additional headers ride with the auth header, which is what keeps them off the token
+    # acquisition request under per-thread auth. They are the base of the merge so anything more
+    # specific - a step's own Content-Type, the generated auth header - overrides them.
+    group_headers = {**ir.application.additional_headers, **flow.headers}
     if not per_thread_auth:
         group_headers.update(auth_header)
     header_node = _headers_node(group_headers, "HTTP Header Manager")
@@ -434,6 +437,9 @@ def _flow_thread_group(
 
         step_headers = _content_type_headers(step)
         if per_thread_auth:
+            # The group-level manager would reach the token request, so both the auth header and
+            # the additional headers travel on the sampler instead.
+            step_headers = {**ir.application.additional_headers, **step_headers}
             step_headers.update(auth_header)
         step_header_node = _headers_node(step_headers, f"{step.name} headers")
         if step_header_node:

@@ -167,6 +167,16 @@ class Application(_Base):
         default=None,
         description="Recorded for reference only. Nothing reads it; Swagger pre-fill is a non-goal",
     )
+    additional_headers: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Literal headers sent on every request, alongside the auth header. Values are written "
+            "into the script as-is and are never resolved from anywhere - a credential belongs in "
+            "auth.token_request.credential_refs or auth.static_credential_refs instead. Lives on "
+            "the application rather than under auth because an API can demand a header with "
+            "auth.type of none: Twitch's Helix needs Client-Id on every call."
+        ),
+    )
 
     @model_validator(mode="after")
     def _no_trailing_slash(self) -> Application:

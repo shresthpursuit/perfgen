@@ -136,7 +136,20 @@ def test_body_passes_through_none(redactor):
 
 
 @pytest.mark.parametrize(
-    "key", ["password", "client_secret", "clientSecret", "api_key", "apiKey", "access_token"]
+    "key",
+    [
+        "password",
+        "client_secret",
+        "clientSecret",
+        "api_key",
+        "apiKey",
+        "access_token",
+        # Header spellings. Found when reusing this for header names: the hyphen used to defeat
+        # both `api_key` and `apikey`, so a header plainly naming a credential slipped through.
+        "X-Api-Key",
+        "X-Auth-Token",
+        "Proxy-Authorization",
+    ],
 )
 def test_sensitive_key_detection(key):
     assert is_sensitive_key(key)

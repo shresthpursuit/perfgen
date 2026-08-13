@@ -56,6 +56,7 @@ from perfgen.parse.values import (
     SLA_UNITS,
     THROUGHPUT_UNITS,
 )
+from perfgen.probe.redact import is_sensitive_key
 
 APPLICATION_SHEET = ("Application",)
 FLOWS_SHEET = ("Flows", "Flow")
@@ -229,8 +230,66 @@ def _parse_application(workbook, collector: _Collector) -> tuple[Application | N
         base_url=base_url.rstrip("/"),
         base_path=_normalise_base_path(cell_text(labelled.get("Base path"))),
         api_reference=cell_text(labelled.get("API reference location")),
+        additional_headers=_parse_additional_headers(labelled, collector, auth),
     )
     return application, auth
+
+
+def _parse_additional_headers(
+    labelled: LabelledSheet, collector: _Collector, auth: Auth
+) -> dict[str, str]:
+    """Read `Additional required headers`, one `Header-Name: value` per line.
+
+    Every problem here is a warning rather than a blocker: the field is optional, and a spec
+    without it is still a valid spec. But none of them are silent, because a header the user meant
+    to send and which quietly went missing shows up much later as an unexplained 400 from the
+    server - the kind of failure this tool exists to keep off the reader's desk.
+    """
+    label = "Additional required headers"
+    location = _where("Application", labelled.row_of(label))
+    headers: dict[str, str] = {}
+
+    for line in values.as_lines(labelled.get(label)):
+        name, separator, value = line.partition(":")
+        # Split on the first colon only: values legitimately contain them - a URL, a timestamp.
+        name, value = name.strip(), value.strip()
+
+        if not separator or not name:
+            collector.warning(
+                "application.additional_headers",
+                f"{location}: {line!r} is not a header. Write one per line as "
+                f"'Header-Name: value'. This line is ignored.",
+            )
+            continue
+
+        if name in headers:
+            collector.warning(
+                "application.additional_headers",
+                f"{location}: header {name!r} is listed more than once. The first value is used "
+                f"and the later one ignored.",
+            )
+            continue
+
+        if auth.header_name and name.lower() == auth.header_name.lower():
+            collector.warning(
+                "application.additional_headers",
+                f"{location}: header {name!r} is also the 'Auth header name'. The authentication "
+                f"header wins, and this literal value is ignored - two mechanisms cannot both own "
+                f"one header.",
+            )
+            continue
+
+        if is_sensitive_key(name):
+            collector.warning(
+                "application.additional_headers",
+                f"{location}: header {name!r} looks like a credential, and its value is written "
+                f"into the generated script in clear text. If it is a secret, put its name in "
+                f"'Credential reference names' instead.",
+            )
+
+        headers[name] = value
+
+    return headers
 
 
 def _normalise_base_path(value: str | None) -> str | None:

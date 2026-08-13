@@ -504,6 +504,39 @@ def test_missing_static_secret_degrades_naming_the_variable(monkeypatch):
     assert api.requests == []
 
 
+def test_additional_headers_are_sent_on_probed_requests():
+    """Without these, a Twitch-shaped API 400s every probe call and the run degrades to guesses.
+
+    Asserted against the transport log rather than the runner's own report - what was sent, not
+    what we believe was sent.
+    """
+    ir = build_ir(auth=False)
+    ir.application.additional_headers = {"Client-Id": "abc123", "X-Trace": "perf-run"}
+
+    api = StubApi()
+    with api.client() as client:
+        run_probe(ir, client=client)
+
+    catalogue = [r for r in api.requests if "catalogue" in r.url.path]
+    assert catalogue
+    for request in catalogue:
+        assert request.headers.get("Client-Id") == "abc123"
+        assert request.headers.get("X-Trace") == "perf-run"
+
+
+def test_additional_headers_sit_alongside_the_auth_header_when_probing():
+    ir = build_ir()
+    ir.application.additional_headers = {"Client-Id": "abc123"}
+
+    api = StubApi()
+    with api.client() as client:
+        run_probe(ir, client=client)
+
+    catalogue = [r for r in api.requests if "catalogue" in r.url.path]
+    assert all(r.headers.get("Client-Id") == "abc123" for r in catalogue)
+    assert all(r.headers.get("Authorization") == f"Bearer {TOKEN}" for r in catalogue)
+
+
 def test_no_auth_spec_probes_flows_directly():
     api = StubApi()
     ir = build_ir(auth=False)

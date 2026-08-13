@@ -64,8 +64,15 @@ _MIN_REDACTABLE_LENGTH = 4
 
 
 def is_sensitive_key(key: str) -> bool:
-    lowered = key.strip().lower()
-    return any(part in lowered for part in SENSITIVE_KEY_PARTS)
+    """Does this name suggest a credential?
+
+    Separators are stripped before matching, so the same rule covers body keys and header names:
+    `client_secret`, `clientSecret` and `X-Api-Key` all reduce to something the parts below match.
+    Without that, `X-Api-Key` matches neither `api_key` nor `apikey` - the hyphen defeats both -
+    and a header that plainly names a credential would slip through.
+    """
+    normalised = re.sub(r"[^a-z0-9]+", "", key.strip().lower())
+    return any(part.replace("_", "") in normalised for part in SENSITIVE_KEY_PARTS)
 
 
 class Redactor:

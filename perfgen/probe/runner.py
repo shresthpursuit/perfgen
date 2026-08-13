@@ -368,7 +368,14 @@ def _run_flow(
 
 
 def _step_headers(step: Step, flow: Flow, ir: TestPlanIR, token: str | None) -> dict[str, str]:
-    headers = {**flow.headers, **step.headers}
+    """The headers a probed request carries - the same set the generated script will send.
+
+    The application's additional headers are included because some APIs reject a request without
+    them: Twitch's Helix wants Client-Id on every call. Probing without it returns 400 on
+    everything, the correlation scan finds nothing in the error bodies, and the run degrades to
+    guesses - a script whose correlations were never actually verified.
+    """
+    headers = {**ir.application.additional_headers, **flow.headers, **step.headers}
     if step.content_type:
         headers.setdefault("Content-Type", step.content_type)
     if token and ir.auth.header_name:

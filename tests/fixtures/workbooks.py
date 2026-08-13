@@ -34,6 +34,11 @@ DEFAULT_APPLICATION: list[tuple[str, str | int | None, str]] = [
     ("Base URL", "https://perf-claims.example.internal", "https://perf-api.example.internal"),
     ("Base path", "/v1", "/api/v2"),
     ("API reference location", None, "https://perf-api.example.internal/swagger.json"),
+    (
+        "Additional required headers",
+        "Client-Id: claims-portal-9f2c\nX-Trace: perf",
+        "Client-Id: abc123xyz",
+    ),
     ("Auth type", "OAuth2 client credentials", "OAuth2 client credentials"),
     ("Token endpoint URL", "https://sso.example.internal/connect/token", "https://auth.x/token"),
     ("Token request method", "POST", "POST"),
