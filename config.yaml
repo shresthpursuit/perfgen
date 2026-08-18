@@ -10,6 +10,15 @@ secrets:
 jmeter:
   version: "5.6.3"     # emitter templates are version-sensitive; a change here should fail the
                        # golden-file test rather than silently produce scripts JMeter won't open
+publish:
+  pipeline_repo: "shresthpursuit/approved-scripts"
+  target_path_prefix: "tests/generated"   # not yet confirmed against the pipeline repo's layout
+  base_branch: "main"
+  credential_ref: "perfgen-publish-token" # -> PERFGEN_PUBLISH_TOKEN, via perfgen.secrets
+  checkout_path: ".perfgen/pipeline"      # gitignored; refreshed from origin on every publish
+  # git refuses to commit without an identity, and a fresh clone may have no global one.
+  committer_name: "perfgen"
+  committer_email: "perfgen@users.noreply.github.com"
 paths:
   specs: data/specs
   ir: data/ir

@@ -17,6 +17,11 @@ data/ir/
 # Probe records: real request and response payloads.
 data/probe/
 
+# Local working clone of the pipeline repo, created by `perfgen publish`. Someone else's
+# repository checked out inside this one - it is not ours to track, and committing it would nest a
+# second git history here. Listed ahead of the code that creates it, same as .env and data/probe/.
+.perfgen/
+
 # JMeter run artifacts
 jmeter.log
 *.jtl

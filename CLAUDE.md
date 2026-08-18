@@ -12,6 +12,10 @@ and the test surface (emitter tested against hand-written IR fixtures, no LLM, n
 stage writes its artifact to disk before the next reads it: `perfgen run` does all of them,
 `parse`/`probe`/`correlate`/`emit` redo any one. All five milestones in the brief are delivered.
 
+`perfgen publish` is a sixth, separate, opt-in stage — never part of `run`. It takes an
+`outputs/<app>/` folder a human has already reviewed and opens a PR on the pipeline repo. See the
+publish amendment below for what it deliberately does and does not do.
+
 ## Hard constraints
 
 - **Never run the tool against a real NFR spreadsheet** (`data/specs/*.xlsx`, or any a user
@@ -67,6 +71,36 @@ stage writes its artifact to disk before the next reads it: `perfgen run` does a
   (`X-Key: {perf-secret}`) are **deferred, not started**: they need secret resolution, probe-record
   redaction, a `${__groovy(System.getenv(...))}` emission path and their own JMeter gate. There is
   no partial hook for them, so the field means exactly one thing.
+- **`perfgen publish` — the git/PR fence was moved deliberately.** Non-goals used to forbid git/PR
+  automation outright; that entry was removed on purpose, not overlooked. `publish` takes an
+  existing `outputs/<app>/`, pushes it to `{target_path_prefix}/<app>/` on a deterministic branch
+  (`perfgen/<slug>`), and opens or updates one PR. It does **not** trigger, monitor or report on an
+  Azure Load Test run, write GitHub Actions files, auto-merge, run JMeter, or call an LLM — and it
+  is never part of `run`. **Running the command is the approval.** A performance engineer has
+  already read the script, run it, and decided it is good; perfgen holds no internal "approved"
+  flag and has no opinion on whether the test is a good test. The one thing it re-checks is
+  structural (`validate_file`), because that same review step invites hand-editing the XML and a
+  typo'd `${var}` is exactly what a human misses there. `needs_review` does not block — it is
+  stated in the PR body instead, and a *fully verified* script says "0 of N need review" explicitly
+  rather than omitting the section, because a blank space reads as "nothing was checked".
+  Credential resolution lives in exactly one function, `perfgen/publish/auth.py`, so the eventual
+  swap to a GitHub App or OIDC credential is one edit; nothing else in the package knows where the
+  token came from. The branch is always cut fresh from the base branch and force-pushed, so a
+  republish replaces rather than stacks — and if the resulting tree matches what is already on
+  `origin/<branch>`, nothing is committed or pushed at all.
+- **Deferred, and the reason it matters more than a usual TODO: `publish` does not scan the files
+  it pushes for secret values.** The guarantee that no secret is ever written into a `.jmx` still
+  holds at emission, but nothing inspects file *contents* between a human's hand-edits and the
+  push. Two reasons to close this before `publish` ever targets a real client repo. First, GitHub's
+  own secret scanning has a coverage gap for client-specific credential formats — it recognises
+  provider tokens it has patterns for, not an internal scheme. Second, and the sharper one: once
+  pushed, a leaked credential is in *someone else's* remote git history. That is materially harder
+  to walk back than a local mistake — rewriting history in a repo you do not own means coordinating
+  with its owners, and any clone, fork or CI cache made in the meantime keeps the value regardless.
+  The design is already settled if it is picked up: reuse `Redactor` value-matching via
+  `Redactor(values).scrub(text) != text` (`_values` is private; that comparison is the public
+  contract and inherits the 4-character floor), plus a few generic credential shapes, skipping any
+  match containing `${` so `${__groovy(System.getenv('PERF_CLIENT_SECRET'))}` cannot fire.
 - **Known noisy, deliberately unfixed:** the correlation scan reports every response body it cannot
   parse as JSON, including HTML error pages from 5xx responses. On a flaky or half-broken API that
   could bury the useful warnings. Revisit only if a real run proves it annoying — under-reporting
@@ -74,12 +108,15 @@ stage writes its artifact to disk before the next reads it: `perfgen run` does a
 
 ## Non-goals — do not build, scaffold, stub, or leave hooks for
 
-Azure Load Test, CI/CD or GitHub Actions files, git/PR automation. UI or browser testing. Result
+Azure Load Test, CI/CD or GitHub Actions files. UI or browser testing. Result
 analysis, reporting, dashboards. Test data generation or CSV Data Set wiring. Vector DBs,
 embeddings, RAG. Retry logic in generated scripts. Per-sample SLA assertions — they mark
 slow-but-successful responses as errors and corrupt the error rate, so SLAs go to a separate
 criteria file. Token refresh. Multi-agent frameworks. **OpenAPI/Swagger pre-fill of Flow steps.**
 If you think one is needed, ask first.
+
+Pushing a reviewed script to the pipeline repo is the one exception, and only as far as
+`perfgen publish` goes — see its amendment above for the boundary.
 
 ## Stack
 Python 3.11+, `pydantic` v2, `openpyxl`, `httpx`, `jinja2` + `lxml`, `pyyaml`, `pytest`, `ruff`; LLM

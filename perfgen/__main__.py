@@ -26,7 +26,22 @@ from perfgen.ir.io import dump_ir, load_ir
 from perfgen.ir.models import TestPlanIR
 from perfgen.parse import parse_workbook
 from perfgen.probe import apply_outcome, dump_record, load_record, run_probe
-from perfgen.summary import RunSummary, exit_code_for, summarise
+from perfgen.publish.auth import resolve_publish_token
+from perfgen.publish.git_ops import GitError, github_remote_url, publish_files, select_files
+from perfgen.publish.pr import (
+    PublishApiError,
+    open_or_update_pr,
+    pr_title,
+    render_pr_body,
+    source_commits,
+)
+from perfgen.summary import (
+    RunSummary,
+    collect_flagged,
+    count_correlations,
+    exit_code_for,
+    summarise,
+)
 from perfgen.validate import validate_file
 
 
@@ -90,6 +105,16 @@ def build_parser() -> argparse.ArgumentParser:
     emit_cmd.add_argument("ir", type=Path, help="path to a Test Plan IR YAML file")
     emit_cmd.add_argument("--out", type=Path, default=None, help="output root")
     emit_cmd.add_argument("--jmeter-version", default=None, help="overrides config.yaml")
+
+    publish_cmd = sub.add_parser(
+        "publish", help="a reviewed output folder -> a pull request on the pipeline repo"
+    )
+    publish_cmd.add_argument(
+        "app_dir", type=Path, help="an output folder produced by a previous run, e.g. outputs/app/"
+    )
+    publish_cmd.add_argument(
+        "--ir", type=Path, default=None, help="IR YAML (default: paths.ir/<app>.yaml)"
+    )
     return parser
 
 
@@ -113,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
         return _correlate(args, config)
     if args.command == "emit":
         return _emit(args, config)
+    if args.command == "publish":
+        return _publish(args, config)
     return 2  # pragma: no cover - argparse enforces the choices
 
 
@@ -385,6 +412,151 @@ def _run(args, config: Config) -> int:
     )
     code = _report(summary)
     return 1 if not report.ok else code
+
+
+# --------------------------------------------------------------------------------------------
+# Publish
+# --------------------------------------------------------------------------------------------
+
+
+def _publish(args, config: Config) -> int:
+    """A reviewed output folder onto a branch of the pipeline repo, behind a pull request.
+
+    Running this command is the approval. A performance engineer has already read the script, run
+    it, and decided it is good - perfgen re-checks only that the file still parses and that no
+    variable reference dangles, because step 2 of that flow involves hand-editing the XML.
+    """
+    secrets.load_dotenv()
+
+    app_dir = Path(args.app_dir)
+    if not app_dir.is_dir():
+        print(f"No such output folder: {app_dir}", file=sys.stderr)
+        print(
+            "publish operates on a folder a previous run already produced, e.g. outputs/my_app/.",
+            file=sys.stderr,
+        )
+        return 1
+
+    app_slug = app_dir.name
+    jmx_files = sorted(app_dir.glob("*.jmx"))
+    if not jmx_files:
+        print(f"No .jmx file in {app_dir}.", file=sys.stderr)
+        print("Run `perfgen run <workbook>` first, or check the folder.", file=sys.stderr)
+        return 1
+
+    ir_path = Path(args.ir) if args.ir else Path(config.paths.ir) / f"{app_slug}.yaml"
+    if not ir_path.is_file():
+        print(f"No IR at {ir_path}.", file=sys.stderr)
+        print(
+            "The pull request states how many correlations still need review, and that count "
+            "comes from the IR - so publishing without it would drop the one thing the reviewer "
+            "most needs. Pass --ir if it lives elsewhere.",
+            file=sys.stderr,
+        )
+        return 1
+
+    ir = load_ir(ir_path)
+    files, skipped = select_files(app_dir)
+    report = validate_file(jmx_files[0])
+
+    if not report.ok:
+        summary = summarise(
+            ir,
+            stages=[f"validate: {report}"],
+            warnings=report.errors,
+            config_warnings=config.warnings(),
+        )
+        print(summary.render())
+        print(
+            "\nStructural validation failed. Nothing was pushed - no branch was created and no "
+            "pull request was opened. Fix the script and publish again."
+        )
+        return 1
+
+    try:
+        owner, repo = config.publish.owner_and_repo()
+    except ValueError as exc:
+        print(f"{exc}", file=sys.stderr)
+        print("Set publish.pipeline_repo in config.yaml.", file=sys.stderr)
+        return 1
+
+    try:
+        token = resolve_publish_token(config)
+    except RuntimeError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+
+    perfgen_commit, spec_commit = source_commits(ir.provenance.source_workbook)
+    flagged = collect_flagged(ir)
+    total = count_correlations(ir)
+    review_line = (
+        f"{len(flagged)} of {total} correlation(s) need review."
+        if flagged
+        else f"All {total} correlation(s) verified." if total else "No correlations."
+    )
+    commit_message = (
+        f"Publish the {ir.application.name} performance script\n"
+        f"\n"
+        f"Generated by perfgen from {ir.provenance.source_workbook}.\n"
+        f"{review_line}\n"
+    )
+
+    try:
+        push = publish_files(
+            files=files,
+            app_slug=app_slug,
+            remote_url=github_remote_url(owner, repo),
+            checkout_path=config.publish.checkout_path,
+            target_path_prefix=config.publish.target_path_prefix,
+            base_branch=config.publish.base_branch,
+            commit_message=commit_message,
+            committer_name=config.publish.committer_name,
+            committer_email=config.publish.committer_email,
+            token=token,
+            skipped=skipped,
+        )
+
+        body = render_pr_body(
+            ir,
+            files=push.files,
+            perfgen_commit=perfgen_commit,
+            spec_commit=spec_commit,
+            skipped=push.skipped,
+        )
+        pull = open_or_update_pr(
+            owner=owner,
+            repo=repo,
+            branch=push.branch,
+            base_branch=config.publish.base_branch,
+            title=pr_title(ir),
+            body=body,
+            token=token,
+        )
+    except (GitError, PublishApiError) as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+
+    stages = [
+        f"validate: {report}",
+        f"push: {push.branch} -> {owner}/{repo}"
+        + ("" if push.committed else " (files unchanged; no new commit)"),
+        f"pull request: {'opened' if pull.created else 'updated'} #{pull.number}",
+    ]
+    notes = []
+    if push.skipped:
+        notes.append(
+            f"Not published: {', '.join(push.skipped)}. Only the .jmx, the .properties files and "
+            f"sla_criteria.yaml are pushed - a local JMeter run leaves its own artifacts here."
+        )
+
+    summary = summarise(
+        ir,
+        stages=stages,
+        config_warnings=config.warnings(),
+        notes=notes,
+        next_command=pull.url,
+    )
+    return _report(summary)
 
 
 if __name__ == "__main__":

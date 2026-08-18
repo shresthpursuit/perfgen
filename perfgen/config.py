@@ -58,6 +58,34 @@ class JMeterConfig(_Base):
     version: str = "5.6.3"
 
 
+class PublishConfig(_Base):
+    """Where `perfgen publish` pushes a reviewed script.
+
+    `credential_ref` is a reference name, never a value - the same convention the workbook uses for
+    every other credential, resolved through `perfgen.secrets`. See `perfgen.publish.auth` for the
+    single place that resolution happens.
+    """
+
+    pipeline_repo: str = Field(
+        default="", description="'owner/repo' of the pipeline repository; empty blocks publishing"
+    )
+    target_path_prefix: str = "tests/generated"
+    base_branch: str = "main"
+    credential_ref: str = "perfgen-publish-token"
+    checkout_path: Path = Path(".perfgen/pipeline")
+    committer_name: str = "perfgen"
+    committer_email: str = "perfgen@users.noreply.github.com"
+
+    def owner_and_repo(self) -> tuple[str, str]:
+        """Split `pipeline_repo`, rejecting anything that is not exactly `owner/repo`."""
+        parts = self.pipeline_repo.strip().strip("/").split("/")
+        if len(parts) != 2 or not all(parts):
+            raise ValueError(
+                f"publish.pipeline_repo must be 'owner/repo', not {self.pipeline_repo!r}"
+            )
+        return parts[0], parts[1]
+
+
 class PathsConfig(_Base):
     specs: Path = Path("data/specs")
     ir: Path = Path("data/ir")
@@ -71,6 +99,7 @@ class Config(_Base):
     probe: ProbeConfig = Field(default_factory=ProbeConfig)
     secrets: SecretsConfig = Field(default_factory=SecretsConfig)
     jmeter: JMeterConfig = Field(default_factory=JMeterConfig)
+    publish: PublishConfig = Field(default_factory=PublishConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
 
     source: Path | None = Field(
