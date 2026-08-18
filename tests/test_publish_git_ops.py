@@ -7,11 +7,13 @@ branching and republish semantics, not HTTPS transport.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from perfgen.publish import git_ops
 from perfgen.publish.git_ops import (
     GitError,
     branch_name,
@@ -213,6 +215,46 @@ def test_skipped_files_are_reported_back_rather_than_dropped_silently(
 def test_every_published_path_is_under_the_application_folder(seeded_repo, app_dir, tmp_path):
     result = publish(app_dir, seeded_repo, tmp_path)
     assert all(p.startswith("tests/generated/order_management/") for p in result.files)
+
+
+# ------------------------------------------------------------------------------------------
+# Removing the previous copy
+
+
+def test_a_transient_lock_on_the_old_copy_does_not_fail_the_publish(tmp_path, monkeypatch):
+    """Windows hands out sharing violations on directories written moments ago - a real run hit
+    exactly this, from OneDrive sync holding the folder open."""
+    target = tmp_path / "previous"
+    target.mkdir()
+    (target / "script.jmx").write_text("<jmeterTestPlan/>", encoding="utf-8")
+
+    real_rmtree = shutil.rmtree
+    attempts = {"count": 0}
+
+    def flaky(path, *args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PermissionError(5, "Access is denied")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(git_ops.shutil, "rmtree", flaky)
+    git_ops.remove_tree(target, delay_s=0)
+
+    assert attempts["count"] == 2
+    assert not target.exists()
+
+
+def test_a_lock_that_never_clears_is_still_an_error(tmp_path, monkeypatch):
+    """Retrying is for a lock that clears itself. One that does not is a real failure."""
+    target = tmp_path / "previous"
+    target.mkdir()
+
+    def always_locked(path, *args, **kwargs):
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(git_ops.shutil, "rmtree", always_locked)
+    with pytest.raises(PermissionError):
+        git_ops.remove_tree(target, attempts=3, delay_s=0)
 
 
 def test_the_remote_url_is_built_from_owner_and_repo():

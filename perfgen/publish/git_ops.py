@@ -13,10 +13,13 @@ same application twice must never leave two PRs behind.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,6 +48,40 @@ class PushResult:
     committed: bool = True
     commit_sha: str = ""
     skipped: list[str] = field(default_factory=list)
+
+
+def _clear_readonly(path: Path) -> None:
+    """Drop the read-only attribute from a tree, deepest first.
+
+    OneDrive's Files On-Demand turns synced folders into cloud placeholders and marks them
+    read-only, and `os.rmdir` on a read-only directory is refused outright - `PermissionError:
+    [WinError 5]`, raised after the contents have already gone, which reads confusingly like a
+    lock. A real publish hit exactly this: the checkout sat inside a synced folder. Retrying
+    cannot help, because nothing about it is transient.
+    """
+    for target in sorted(path.rglob("*"), reverse=True) + [path]:
+        # Best effort. If one really is undeletable, rmtree reports it properly below.
+        with contextlib.suppress(OSError):
+            os.chmod(target, stat.S_IWRITE)
+
+
+def remove_tree(path: Path, attempts: int = 5, delay_s: float = 0.2) -> None:
+    """`shutil.rmtree`, hardened for Windows, where two different things go wrong.
+
+    The read-only attribute is permanent and handled by clearing it first (see `_clear_readonly`).
+    A sharing violation is transient - a search indexer or antivirus scanner holding a file opened
+    moments ago - and is handled by retrying. Failing a whole publish over a lock that clears
+    itself in 200ms would be the wrong trade; one that never clears still raises.
+    """
+    for attempt in range(attempts):
+        try:
+            _clear_readonly(path)
+            shutil.rmtree(path)
+            return
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay_s * (attempt + 1))
 
 
 def branch_name(app_slug: str) -> str:
@@ -137,7 +174,7 @@ def _prepare_checkout(remote_url: str, checkout_path: Path, token: str | None) -
     if checkout_path.exists() and not _is_repo_for(checkout_path, remote_url):
         # Points somewhere else, or is not a repo at all. It is ours and gitignored, so replacing
         # it is safe and beats guessing what a half-configured checkout meant.
-        shutil.rmtree(checkout_path)
+        remove_tree(checkout_path)
 
     if not checkout_path.exists():
         checkout_path.parent.mkdir(parents=True, exist_ok=True)
@@ -222,7 +259,7 @@ def publish_files(
     relative = f"{target_path_prefix.strip('/')}/{app_slug}"
     destination = repo / relative
     if destination.exists():
-        shutil.rmtree(destination)
+        remove_tree(destination)
     destination.mkdir(parents=True, exist_ok=True)
     for source in files:
         shutil.copy2(source, destination / source.name)

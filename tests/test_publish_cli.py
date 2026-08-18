@@ -129,8 +129,12 @@ def test_a_missing_output_folder_is_refused(tmp_path, workspace, stub_publish, c
 
 
 def test_an_unset_token_is_refused_and_names_the_variable(
-    workspace, stub_publish, monkeypatch, capsys
+    workspace, stub_publish, monkeypatch, tmp_path, capsys
 ):
+    # publish calls secrets.load_dotenv(), which reads `.env` from the working directory. On a
+    # machine that has a real one - anybody who has actually published - that would put the token
+    # straight back and this test would silently stop testing anything. Run somewhere without one.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PERFGEN_PUBLISH_TOKEN")
 
     exit_code = main(["--config", workspace["config"], "publish", workspace["app_dir"]])
