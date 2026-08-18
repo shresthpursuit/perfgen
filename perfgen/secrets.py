@@ -47,13 +47,19 @@ def load_dotenv(root: str | Path | None = None) -> Path | None:
 
     Values already in the environment win, so an explicitly exported variable is never overridden
     by a stale file.
+
+    Read as `utf-8-sig`, not `utf-8`, so a byte order mark is discarded rather than absorbed into
+    the first key name. PowerShell's `>` and `Out-File` write a BOM by default, which is the most
+    natural way for a Windows user to create this file - and the failure it caused was silent and
+    badly misleading: the BOM became part of the key, so the variable read back as unset while
+    sitting in plain sight in the file, and the tool reported it as never having been set.
     """
     from dotenv import load_dotenv as _load
 
     candidate = Path(root or Path.cwd()) / ".env"
     if not candidate.is_file():
         return None
-    _load(candidate, override=False)
+    _load(candidate, override=False, encoding="utf-8-sig")
     return candidate
 
 

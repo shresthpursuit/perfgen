@@ -137,3 +137,14 @@ def test_credential_reference_matching(param, refs, expected):
 def test_ambiguous_credentials_are_not_guessed_at():
     """Two references could supply this parameter; picking one would be a coin toss."""
     assert naming.match_credential_ref("client_id", ["alpha-id", "beta-id"]) is None
+
+
+def test_a_dotenv_written_with_a_utf8_bom_still_resolves(tmp_path, monkeypatch):
+    """PowerShell's `>` writes a BOM. It used to become part of the first key name, so the
+    variable read back as unset while sitting in plain sight in the file."""
+    (tmp_path / ".env").write_bytes(b"\xef\xbb\xbfPERF_CLIENT_ID=from-a-bom-file\n")
+    monkeypatch.delenv("PERF_CLIENT_ID", raising=False)
+
+    secrets.load_dotenv(tmp_path)
+
+    assert secrets.resolve("perf-client-id") == "from-a-bom-file"
