@@ -182,7 +182,7 @@ def test_a_credential_shaped_literal_is_refused_before_any_git_command(
 
     assert exit_code == 1
     assert "Client-Id" in text
-    assert "allow_literal_headers" in text
+    assert "no way to exempt it" in text
     assert stub_publish["push"] == []
     assert stub_publish["pr"] == []
 

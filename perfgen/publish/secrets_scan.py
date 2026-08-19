@@ -22,9 +22,18 @@ Two layers, because either alone misses that incident:
   one, is flagged whether or not it was ever a resolvable reference. This is the layer that catches
   a literal nobody declared.
 
-Anything flagged blocks the publish. A value that is knowingly public is opted out by name in
-`publish.allow_literal_headers` - per header, never a blanket switch, so the decision is recorded
-in git rather than made by a flag at the terminal.
+Anything flagged blocks the publish, and there is deliberately no way to exempt it. An allowlist
+keyed on the header *name* was built and then removed: a name is global across every specification,
+so allowing `Client-Id` for one API would also wave through a header of that name on a different
+API whose value is genuinely secret - reopening the hole this exists to close. Scoping an exemption
+to name *and* value would fix that, and is cheap, but there is one case to generalise from and no
+second real one yet to show what a genuine exemption needs to look like. So it waits, as XML
+parsing, token refresh and credential-sourced headers each did.
+
+The practical consequence is that a specification carrying a credential-shaped literal cannot be
+published at all. That is the correct state, not a gap to route around: if such a value is a real
+requirement, the work is to close the credential-sourced-headers deferral so it resolves from the
+environment like every other credential, not to add a list of things nobody checks.
 """
 
 from __future__ import annotations
@@ -192,15 +201,12 @@ def _fields_in(path: Path, text: str) -> list[tuple[str, str]]:
 # --------------------------------------------------------------------------------------------
 
 
-def scan_files(
-    files: list[Path],
-    ir: TestPlanIR,
-    *,
-    allow_literal_headers: list[str] | None = None,
-) -> ScanReport:
-    """Scan everything about to be published. Any error stops the publish."""
+def scan_files(files: list[Path], ir: TestPlanIR) -> ScanReport:
+    """Scan everything about to be published. Any error stops the publish, with no way to override.
+
+    There is no exemption parameter by design - see the module docstring.
+    """
     report = ScanReport()
-    allowed = {name.strip().lower() for name in (allow_literal_headers or [])}
 
     known_values, unresolved = resolve_known_values(ir)
     redactor = Redactor(known_values)
@@ -239,8 +245,6 @@ def scan_files(
         for name, value in _fields_in(Path(path), text):
             if not value or "${" in value:
                 continue
-            if name.strip().lower() in allowed:
-                continue
             by_name = looks_like_credential_field(name)
             by_shape = looks_like_credential_value(value)
             if by_name or by_shape:
@@ -252,9 +256,11 @@ def scan_files(
                     else "its name reads as a credential and its value is shaped like one"
                 )
                 report.errors.append(
-                    f"{path.name} publishes {name!r} as a literal value and {reason}. If that "
-                    f"value is knowingly public, add {name!r} to publish.allow_literal_headers "
-                    f"in config.yaml; otherwise take it out of the specification."
+                    f"{path.name} publishes {name!r} as a literal value and {reason}. There is no "
+                    f"way to exempt it: take the value out of the specification. If the request "
+                    f"genuinely needs this header, it has to resolve from the environment like "
+                    f"every other credential - which means closing the deferral on "
+                    f"credential-sourced headers, not publishing the value."
                 )
 
     return report

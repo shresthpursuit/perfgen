@@ -108,9 +108,17 @@ publish amendment below for what it deliberately does and does not do.
     `^[A-Za-z0-9_-]{20,}$` with no `/`, `.` or space, which excludes media types, versions and
     prose. Anything containing `${` is never flagged — the emitted script is full of
     `${__groovy(System.getenv(...))}` by design.
-  A value that is knowingly public is opted out **per header** in `publish.allow_literal_headers`,
-  never by a blanket flag: the decision lands in git where it can be reviewed, and everything
-  unnamed still blocks. The reason this blocks rather than warns is that a warning is what got
+  **There is deliberately no exemption mechanism.** A `publish.allow_literal_headers` allowlist was
+  built and then removed: it keyed on the header *name*, which is global across every spec, so
+  allowing `Client-Id` for one API would also wave through that header on a different API whose
+  value is genuinely secret — reopening the hole. Scoping to name *and* value would fix that and is
+  cheap (~20 lines), but there is one case to generalise from and no second real one yet, so it
+  waits, as XML parsing, token refresh and credential-sourced headers each did. It was dropped
+  rather than stubbed because an unused hook invites reintroducing the hole without anyone
+  re-deriving why it was closed. The consequence is real and accepted: a spec carrying a
+  credential-shaped literal cannot be published at all — the Twitch smoke test is permanently
+  blocked — and the fix for a genuine need is to close the credential-sourced-headers deferral, not
+  to add a list. The reason this blocks rather than warns is that a warning is what got
   skimmed past the first time — and once pushed, a credential is in *someone else's* remote git
   history, which is far harder to walk back than a local mistake. Rewriting history in a repo you
   do not own means coordinating with its owners, and any clone, fork or CI cache made in between

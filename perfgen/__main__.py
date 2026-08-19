@@ -474,7 +474,7 @@ def _publish(args, config: Config) -> int:
         )
         return 1
 
-    scan = scan_files(files, ir, allow_literal_headers=config.publish.allow_literal_headers)
+    scan = scan_files(files, ir)
     if not scan.ok:
         summary = summarise(
             ir,

@@ -64,7 +64,7 @@ def test_the_literal_client_id_that_reached_a_real_repository_is_caught(
 
     assert not report.ok
     assert any("Client-Id" in e for e in report.errors)
-    assert any("allow_literal_headers" in e for e in report.errors)
+    assert any("no way to exempt it" in e for e in report.errors)
 
 
 def test_the_incident_value_is_caught_even_under_a_harmless_field_name(
@@ -78,22 +78,24 @@ def test_the_incident_value_is_caught_even_under_a_harmless_field_name(
     assert any("shaped like a generated credential" in e for e in report.errors)
 
 
-def test_an_allowlisted_header_publishes(tmp_path, auth_shared_token):
-    jmx = jmx_with_headers(tmp_path / "app.jmx", {"Client-Id": LEAKED_CLIENT_ID})
-    report = scan_files([jmx], auth_shared_token, allow_literal_headers=["Client-Id"])
+def test_there_is_no_way_to_exempt_a_credential_shaped_literal(tmp_path, auth_shared_token):
+    """Pins the decision, so the mechanism is not reintroduced casually.
 
-    assert report.ok
+    A name-keyed allowlist existed briefly and was removed: a header name is global across every
+    specification, so exempting `Client-Id` for one API would also exempt it on another whose value
+    is genuinely secret. `scan_files` therefore takes no exemption argument at all - the only
+    remedy is to take the value out of the specification.
+    """
+    import inspect
 
-
-def test_the_allowlist_is_per_header_not_a_blanket_switch(tmp_path, auth_shared_token):
-    jmx = jmx_with_headers(
-        tmp_path / "app.jmx", {"Client-Id": LEAKED_CLIENT_ID, "X-Other": LEAKED_CLIENT_ID}
+    parameters = set(inspect.signature(scan_files).parameters)
+    assert parameters == {"files", "ir"}, (
+        f"scan_files grew an exemption parameter: {parameters - {'files', 'ir'}}. "
+        f"See the module docstring before adding one."
     )
-    report = scan_files([jmx], auth_shared_token, allow_literal_headers=["Client-Id"])
 
-    assert not report.ok
-    assert any("X-Other" in e for e in report.errors)
-    assert not any("'Client-Id'" in e for e in report.errors)
+    jmx = jmx_with_headers(tmp_path / "app.jmx", {"Client-Id": LEAKED_CLIENT_ID})
+    assert not scan_files([jmx], auth_shared_token).ok
 
 
 # ------------------------------------------------------------------------------------------

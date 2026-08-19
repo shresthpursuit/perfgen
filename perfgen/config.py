@@ -75,14 +75,6 @@ class PublishConfig(_Base):
     checkout_path: Path = Path(".perfgen/pipeline")
     committer_name: str = "perfgen"
     committer_email: str = "perfgen@users.noreply.github.com"
-    allow_literal_headers: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Header names whose literal value is knowingly published. Per-header and never a "
-            "blanket off-switch: the secrets scan blocks every other credential-shaped literal. "
-            "Each entry is a deliberate, reviewable decision recorded in git."
-        ),
-    )
 
     def owner_and_repo(self) -> tuple[str, str]:
         """Split `pipeline_repo`, rejecting anything that is not exactly `owner/repo`."""
