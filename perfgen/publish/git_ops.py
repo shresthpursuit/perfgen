@@ -48,6 +48,13 @@ class PushResult:
     committed: bool = True
     commit_sha: str = ""
     skipped: list[str] = field(default_factory=list)
+    matches_base: bool = False
+    """The branch content is already identical to the base branch.
+
+    True means a previous publish was merged and nothing has changed since - so there is nothing
+    to open a pull request about. GitHub refuses that create with `422 No commits between ...`,
+    which is a correct answer to a question worth not asking.
+    """
 
 
 def _clear_readonly(path: Path) -> None:
@@ -272,6 +279,7 @@ def publish_files(
     # origin/<branch> answers the question that matters: would this push change the PR at all?
     staged_tree = _run_git(["write-tree"], cwd=repo).stdout.strip()
     remote_tree = git_output(["rev-parse", f"origin/{branch}^{{tree}}"], cwd=repo)
+    base_tree = git_output(["rev-parse", f"origin/{base_branch}^{{tree}}"], cwd=repo)
     if remote_tree is not None and remote_tree == staged_tree:
         return PushResult(
             branch=branch,
@@ -279,6 +287,7 @@ def publish_files(
             committed=False,
             commit_sha=git_output(["rev-parse", f"origin/{branch}"], cwd=repo) or "",
             skipped=[f.name for f in (skipped or [])],
+            matches_base=base_tree == staged_tree,
         )
 
     # mkstemp hands back an open descriptor; on Windows the file cannot be removed while it is

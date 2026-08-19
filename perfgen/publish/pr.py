@@ -105,12 +105,17 @@ def open_or_update_pr(
     token: str,
     base_url: str = GITHUB_API,
     transport: httpx.BaseTransport | None = None,
-) -> PullRequest:
+    create_if_missing: bool = True,
+) -> PullRequest | None:
     """Open a PR for `branch`, or update the one that is already open for it.
 
     Republishing an application must not leave a second PR behind, so an existing open PR for the
     same head branch is updated in place - it already has the new commits from the force-push, and
     only the body needs refreshing.
+
+    `create_if_missing=False` returns None rather than opening one, for the case where the branch
+    holds nothing the base does not already have. That happens after a previous PR was merged and
+    nothing changed since; creating there is a request GitHub correctly refuses.
     """
     with _client(token, base_url, transport) as client:
         existing = client.get(
@@ -126,6 +131,9 @@ def open_or_update_pr(
             )
             data = _check(updated, f"Updating pull request #{number}", base_branch)
             return PullRequest(number=data["number"], url=data["html_url"], created=False)
+
+        if not create_if_missing:
+            return None
 
         created = client.post(
             f"/repos/{owner}/{repo}/pulls",

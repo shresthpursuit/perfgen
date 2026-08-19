@@ -97,6 +97,24 @@ def test_republishing_updates_the_existing_pr_instead_of_opening_a_second():
     assert github.body_sent()["body"] == "refreshed body"
 
 
+def test_nothing_is_created_when_the_branch_holds_nothing_new():
+    """After a merge, asking GitHub to open a PR earns a 422. Better not to ask."""
+    github = FakeGitHub(open_prs=[])
+    result = call(github, create_if_missing=False)
+
+    assert result is None
+    assert [r.method for r in github.requests] == ["GET"]
+
+
+def test_an_open_pr_is_still_updated_even_when_creation_is_disallowed():
+    github = FakeGitHub(open_prs=[{"number": 3, "html_url": "https://github.com/o/r/pull/3"}])
+    result = call(github, create_if_missing=False)
+
+    assert result is not None
+    assert result.number == 3
+    assert [r.method for r in github.requests] == ["GET", "PATCH"]
+
+
 def test_the_existing_pr_is_looked_up_by_head_branch():
     github = FakeGitHub()
     call(github)

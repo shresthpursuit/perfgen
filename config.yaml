@@ -19,6 +19,11 @@ publish:
   # git refuses to commit without an identity, and a fresh clone may have no global one.
   committer_name: "perfgen"
   committer_email: "perfgen@users.noreply.github.com"
+  # Header names whose literal value is knowingly published. Everything else that looks like a
+  # credential blocks the publish. One line per value, each a deliberate decision:
+  #   allow_literal_headers:
+  #     - Client-Id       # public OAuth identifier, reviewed <date>
+  allow_literal_headers: []
 paths:
   specs: data/specs
   ir: data/ir

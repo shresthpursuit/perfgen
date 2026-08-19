@@ -162,6 +162,58 @@ def test_an_unset_pipeline_repo_is_refused(workspace, stub_publish, tmp_path, ca
     assert stub_publish["push"] == []
 
 
+def test_a_credential_shaped_literal_is_refused_before_any_git_command(
+    workspace, stub_publish, capsys
+):
+    """The incident this scan exists for: a live Client-Id published as a literal header."""
+    jmx = workspace["jmx"]
+    original = jmx.read_bytes()
+    anchor = b'<stringProp name="Header.name">Authorization</stringProp>'
+    assert anchor in original
+    injected = (
+        b'<stringProp name="Header.name">Client-Id</stringProp>'
+        b'<stringProp name="Header.value">wr4vhwv9u8xwbcuz0x694fmbbgrt03</stringProp>'
+        b"</elementProp><elementProp name=\"Authorization\" elementType=\"Header\">" + anchor
+    )
+    jmx.write_bytes(original.replace(anchor, injected, 1))
+
+    exit_code = main(["--config", workspace["config"], "publish", workspace["app_dir"]])
+    text = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert "Client-Id" in text
+    assert "allow_literal_headers" in text
+    assert stub_publish["push"] == []
+    assert stub_publish["pr"] == []
+
+
+def test_an_already_merged_branch_reports_cleanly_instead_of_failing(
+    workspace, stub_publish, monkeypatch, capsys
+):
+    """GitHub answers a create here with 422. The command should not have asked."""
+    from perfgen.publish.git_ops import PushResult
+
+    def merged_push(**kwargs):
+        stub_publish["push"].append(kwargs)
+        return PushResult(
+            branch=f"perfgen/{kwargs['app_slug']}",
+            files=[f"tests/generated/{kwargs['app_slug']}/{f.name}" for f in kwargs["files"]],
+            committed=False,
+            commit_sha="abc1234",
+            matches_base=True,
+        )
+
+    monkeypatch.setattr("perfgen.__main__.publish_files", merged_push)
+    monkeypatch.setattr("perfgen.__main__.open_or_update_pr", lambda **kw: None)
+
+    exit_code = main(["--config", workspace["config"], "publish", workspace["app_dir"]])
+    text = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "already merged" in text
+    assert "Nothing to publish" in text
+
+
 # ------------------------------------------------------------------------------------------
 # The happy path
 

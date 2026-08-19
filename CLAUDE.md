@@ -78,9 +78,10 @@ publish amendment below for what it deliberately does and does not do.
   Azure Load Test run, write GitHub Actions files, auto-merge, run JMeter, or call an LLM — and it
   is never part of `run`. **Running the command is the approval.** A performance engineer has
   already read the script, run it, and decided it is good; perfgen holds no internal "approved"
-  flag and has no opinion on whether the test is a good test. The one thing it re-checks is
-  structural (`validate_file`), because that same review step invites hand-editing the XML and a
-  typo'd `${var}` is exactly what a human misses there. `needs_review` does not block — it is
+  flag and has no opinion on whether the test is a good test. It re-checks exactly two things, both
+  cheap and local: structural (`validate_file`), because that same review step invites hand-editing
+  the XML and a typo'd `${var}` is exactly what a human misses there, and the secrets scan (see
+  below). Neither judges the test; both judge the files. `needs_review` does not block — it is
   stated in the PR body instead, and a *fully verified* script says "0 of N need review" explicitly
   rather than omitting the section, because a blank space reads as "nothing was checked".
   Credential resolution lives in exactly one function, `perfgen/publish/auth.py`, so the eventual
@@ -88,19 +89,37 @@ publish amendment below for what it deliberately does and does not do.
   token came from. The branch is always cut fresh from the base branch and force-pushed, so a
   republish replaces rather than stacks — and if the resulting tree matches what is already on
   `origin/<branch>`, nothing is committed or pushed at all.
-- **Deferred, and the reason it matters more than a usual TODO: `publish` does not scan the files
-  it pushes for secret values.** The guarantee that no secret is ever written into a `.jmx` still
-  holds at emission, but nothing inspects file *contents* between a human's hand-edits and the
-  push. Two reasons to close this before `publish` ever targets a real client repo. First, GitHub's
-  own secret scanning has a coverage gap for client-specific credential formats — it recognises
-  provider tokens it has patterns for, not an internal scheme. Second, and the sharper one: once
-  pushed, a leaked credential is in *someone else's* remote git history. That is materially harder
-  to walk back than a local mistake — rewriting history in a repo you do not own means coordinating
-  with its owners, and any clone, fork or CI cache made in the meantime keeps the value regardless.
-  The design is already settled if it is picked up: reuse `Redactor` value-matching via
-  `Redactor(values).scrub(text) != text` (`_values` is private; that comparison is the public
-  contract and inherits the 4-character floor), plus a few generic credential shapes, skipping any
-  match containing `${` so `${__groovy(System.getenv('PERF_CLIENT_SECRET'))}` cannot fire.
+- **The secrets scan exists because deferring it cost a live credential.** It was deferred on the
+  first build, and the first real publish put a working Twitch `Client-Id` into a repository that
+  was public at the time. The value came from `application.additional_headers` — literal only,
+  resolved from nowhere — so it was never a secret *reference*, and a value-matching scan had
+  nothing to match it against. Hence two layers in `perfgen/publish/secrets_scan.py`, because
+  either alone misses that case:
+  - **By value.** Every reference the spec declares (`credential_refs`, `static_credential_refs`,
+    `param_names`, plus the basic-auth base64 blob), resolved and matched with
+    `Redactor(values).scrub(text) != text` — `_values` is private; that comparison is the public
+    contract and inherits the 4-character floor. Its limit is real: a reference whose variable is
+    unset locally cannot be checked, and **reporting that silently is exactly how the incident was
+    missed**, so unresolvable references are named out loud in a warning.
+  - **By name and shape.** `is_sensitive_key` is deliberately *not* widened — it drives probe-record
+    redaction, a different stage — so `EXTRA_SENSITIVE_PARTS` extends it locally. Note
+    `is_sensitive_key("Client-Id")` is `False`: it normalises to `clientid`, which matches none of
+    the existing parts. Shape catches an opaque value under an innocuous name:
+    `^[A-Za-z0-9_-]{20,}$` with no `/`, `.` or space, which excludes media types, versions and
+    prose. Anything containing `${` is never flagged — the emitted script is full of
+    `${__groovy(System.getenv(...))}` by design.
+  A value that is knowingly public is opted out **per header** in `publish.allow_literal_headers`,
+  never by a blanket flag: the decision lands in git where it can be reviewed, and everything
+  unnamed still blocks. The reason this blocks rather than warns is that a warning is what got
+  skimmed past the first time — and once pushed, a credential is in *someone else's* remote git
+  history, which is far harder to walk back than a local mistake. Rewriting history in a repo you
+  do not own means coordinating with its owners, and any clone, fork or CI cache made in between
+  keeps the value regardless.
+- **A branch already merged into the base is not an error.** `publish` compares the staged tree to
+  the base branch as well as to `origin/<branch>`; when they match, a previous PR was merged and
+  nothing has changed since, so no PR is opened and the run exits 0 saying so. Asking GitHub to
+  open that PR earns `422 No commits between ...`, which is a correct answer to a question worth
+  not asking.
 - **Known noisy, deliberately unfixed:** the correlation scan reports every response body it cannot
   parse as JSON, including HTML error pages from 5xx responses. On a flaky or half-broken API that
   could bury the useful warnings. Revisit only if a real run proves it annoying — under-reporting

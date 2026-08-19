@@ -147,6 +147,31 @@ def test_republishing_unchanged_files_makes_no_new_commit(seeded_repo, app_dir, 
     assert git("rev-list", "--count", "main..perfgen/order_management", cwd=seeded_repo) == "1"
 
 
+def test_a_branch_still_ahead_of_base_is_not_reported_as_merged(seeded_repo, app_dir, tmp_path):
+    first = publish(app_dir, seeded_repo, tmp_path)
+    second = publish(app_dir, seeded_repo, tmp_path)
+
+    assert first.matches_base is False
+    assert second.matches_base is False
+
+
+def test_a_branch_already_merged_into_base_is_reported_as_such(seeded_repo, app_dir, tmp_path):
+    """After a merge the branch holds nothing new, and opening a PR for it is a 422."""
+    publish(app_dir, seeded_repo, tmp_path)
+
+    # Stand in for a human merging the pull request.
+    merge = tmp_path / "merge"
+    git("clone", str(seeded_repo), str(merge), cwd=tmp_path)
+    git("checkout", "main", cwd=merge)
+    git("merge", "--no-ff", "-m", "merge", "origin/perfgen/order_management", cwd=merge)
+    git("push", "origin", "main", cwd=merge)
+
+    after = publish(app_dir, seeded_repo, tmp_path)
+
+    assert after.committed is False
+    assert after.matches_base is True
+
+
 def test_a_file_removed_since_the_last_publish_is_removed_from_the_branch(
     seeded_repo, app_dir, tmp_path
 ):

@@ -35,6 +35,7 @@ from perfgen.publish.pr import (
     render_pr_body,
     source_commits,
 )
+from perfgen.publish.secrets_scan import scan_files
 from perfgen.summary import (
     RunSummary,
     collect_flagged,
@@ -473,6 +474,22 @@ def _publish(args, config: Config) -> int:
         )
         return 1
 
+    scan = scan_files(files, ir, allow_literal_headers=config.publish.allow_literal_headers)
+    if not scan.ok:
+        summary = summarise(
+            ir,
+            stages=[f"validate: {report}", f"secrets scan: {scan}"],
+            warnings=scan.errors + scan.warnings,
+            config_warnings=config.warnings(),
+        )
+        print(summary.render())
+        print(
+            "\nThe secrets scan refused this publish. Nothing was pushed - no branch was created "
+            "and no pull request was opened. A credential that reaches a repository is far harder "
+            "to withdraw than one caught here."
+        )
+        return 1
+
     try:
         owner, repo = config.publish.owner_and_repo()
     except ValueError as exc:
@@ -531,18 +548,41 @@ def _publish(args, config: Config) -> int:
             title=pr_title(ir),
             body=body,
             token=token,
+            # Nothing the base branch does not already have means a previous pull request was
+            # merged and nothing changed since. Opening one there is a request GitHub refuses.
+            create_if_missing=not push.matches_base,
         )
     except (GitError, PublishApiError) as exc:
         print(f"{exc}", file=sys.stderr)
         return 1
 
+    if pull is None:
+        summary = summarise(
+            ir,
+            stages=[
+                f"validate: {report}",
+                f"secrets scan: {scan}",
+                f"push: {push.branch} is already merged into {config.publish.base_branch}",
+            ],
+            warnings=scan.warnings,
+            config_warnings=config.warnings(),
+            notes=[
+                f"Nothing to publish. {push.branch} carries no change that "
+                f"{config.publish.base_branch} does not already have, so the previous pull "
+                f"request was merged and these files have not changed since. Re-run after "
+                f"regenerating the script, or publish a different application."
+            ],
+        )
+        return _report(summary)
+
     stages = [
         f"validate: {report}",
+        f"secrets scan: {scan}",
         f"push: {push.branch} -> {owner}/{repo}"
         + ("" if push.committed else " (files unchanged; no new commit)"),
         f"pull request: {'opened' if pull.created else 'updated'} #{pull.number}",
     ]
-    notes = []
+    notes = list(scan.warnings)
     if push.skipped:
         notes.append(
             f"Not published: {', '.join(push.skipped)}. Only the .jmx, the .properties files and "
