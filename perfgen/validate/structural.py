@@ -192,6 +192,14 @@ def _produced_variables(root: etree._Element) -> set[str]:
             if prop.text:
                 produced.update(re.findall(r'props\.put\(\s*"([^"]+)"', prop.text))
 
+    # vars.put('name', ...) inside a JSR223 sampler. A script that computes a value - the PKCE
+    # code verifier and its challenge - produces a variable as surely as an extractor does, and
+    # without this every reference to one reads as dangling.
+    for element in root.iter("JSR223Sampler"):
+        for prop in element.findall(".//stringProp[@name='script']"):
+            if prop.text:
+                produced.update(re.findall(r"""vars\.put\(\s*['"]([^'"]+)['"]""", prop.text))
+
     return produced
 
 

@@ -16,6 +16,10 @@ stage writes its artifact to disk before the next reads it: `perfgen run` does a
 `outputs/<app>/` folder a human has already reviewed and opens a PR on the pipeline repo. See the
 publish amendment below for what it deliberately does and does not do.
 
+All seven auth types are supported, PKCE included (M7). Its login sequence is *declared* in an
+`Auth flow steps` sheet and its values are *discovered* by correlation — the same division as
+everywhere else in this tool: the human supplies structure, the machine supplies correlations.
+
 ## Hard constraints
 
 - **Never run the tool against a real NFR spreadsheet** (`data/specs/*.xlsx`, or any a user
@@ -128,6 +132,59 @@ publish amendment below for what it deliberately does and does not do.
   nothing has changed since, so no PR is opened and the run exits 0 saying so. Asking GitHub to
   open that PR earns `422 No commits between ...`, which is a correct answer to a question worth
   not asking.
+- **PKCE is supported (M7), and the reasoning that refused it was wrong.** The refusal lived in
+  `perfgen/parse/workbook.py`, not here, and said PKCE "needs a browser redirect and an interactive
+  login". That conflated two different things: the *cryptographic* half is pure computation, and
+  the *login* half is a sequence of ordinary HTTP requests. Both are automatable, and
+  `docs/reference/pkce_entra_reference.jmx` — hand-built, confirmed to obtain a real token from a
+  live Entra tenant — is the proof. What genuinely cannot be automated away is that a
+  password-based login needs a real account's credentials; those are references like every other
+  secret.
+- **Read the reference for what to copy *and* what not to.** Three of its behaviours are live
+  defects in a script that nonetheless works, each now pinned by a test:
+  - Its `/login` sampler has **no `follow_redirects` property at all**, so the 302 survives by
+    omission. The custom `msal…://` scheme is a red herring — JMeter never attempts a redirect it
+    is told not to follow. perfgen states `follow_redirects=false` explicitly on the code-producing
+    step, because an `https://` redirect URI would otherwise consume the Location header silently.
+  - Its verifier and challenge round-trip through **JVM-global properties**, which races the moment
+    more than one thread runs; it survives only at `num_threads=1`. perfgen keeps both as thread
+    variables and never promotes them.
+  - Nearly every one of its extractors leaves **`match_number` empty**, which JMeter reads as `0`
+    — *random match*. perfgen's templates pin `1`.
+  The brief also described the reference as using a setUp thread group, and elsewhere as putting
+  auth in the same group as the load flows. Neither is so: it has exactly one plain `ThreadGroup`
+  and **no load flows at all**.
+- **PKCE defaults to `per_thread`, wrapped in a Once Only Controller.** Per-thread is the shape the
+  reference actually ran, so it is the shape the gate exercises; `shared_setup` stays available
+  when a spec asks for it, and is gentler on an IdP at high user counts. The Once Only Controller
+  is what makes "per thread" mean *once per virtual user* rather than once per iteration — without
+  it a soak test re-authenticates every loop and measures the identity provider. **In `per_thread`
+  the token is a thread variable, never a property**: one property with N writers means the last
+  thread wins, which defeats per-thread auth entirely. `props.put` stays correct for
+  `shared_setup`, where one setUp group genuinely hands a token to separate flow groups.
+- **Raw-text correlation (Half B) synthesises extractors, and two rules keep that honest.**
+  Structured parsing hands you a location for free; raw text hands you a byte offset, which JMeter
+  cannot read back. So `perfgen/correlate/text.py`:
+  - **Anchors on a key, never a character window.** A window to the left of a match can include a
+    neighbouring value that changes every run, producing an extractor that works on the recorded
+    body and never again — silently, because JMeter substitutes the default and carries on. If
+    nothing key-shaped abuts the value, no extractor is offered.
+  - **Verifies by execution.** The synthesised expression is run against the recorded body and must
+    reproduce exactly the correlated value, exactly once. Anything else is rejected, not flagged.
+  Boundary extraction is the default over regex: the reference's `client-request-id=…&` needs
+  `\\\\u0026` as a regex and nothing at all as a boundary. Regex keeps the header-scoped `code=`
+  case, where the value can run to end-of-string with no right boundary. The extractor *type* for a
+  text body is forced deterministically rather than left to the model — nothing but a boundary can
+  read an unparseable body, so it is a fact about the body, not a judgement about the correlation.
+- **Half B needed two probe fixes the brief did not mention.** Scoped to `correlate/scan.py` alone
+  it would have failed the gate, because correlation runs on a record the probe could not produce:
+  `_index_response` could only index JSON, so an HTML login page taught it nothing; and
+  `_resolve_path` filled placeholders in the **path only**, so `content=step.body` sent
+  `{"originalRequest":"{sCtx}"}` as literal text. Bodies and headers are now resolved too.
+- **`Request headers` is a column on both `Flow steps` and `Auth flow steps`.** `Step.headers`
+  existed in the IR and the emitter already wrote per-step `HeaderManager`s — only the parser never
+  filled it. Needed independently of PKCE: a flow step carrying a correlated header was previously
+  inexpressible.
 - **Known noisy, deliberately unfixed:** the correlation scan reports every response body it cannot
   parse as JSON, including HTML error pages from 5xx responses. On a flaky or half-broken API that
   could bury the useful warnings. Revisit only if a real run proves it annoying — under-reporting

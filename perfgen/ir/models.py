@@ -185,6 +185,20 @@ class Application(_Base):
         return self
 
 
+class SeedCookie(_Base):
+    """A cookie the IdP expects to already exist before the login flow starts.
+
+    IdP-specific and discovered by observation, so it belongs in the specification rather than in
+    code - the reference Entra flow seeds three on login.microsoftonline.com.
+    """
+
+    name: str
+    value: str
+    domain: str
+    path: str = "/"
+    secure: bool = True
+
+
 class TokenRequest(_Base):
     method: str
     url: str
@@ -225,6 +239,47 @@ class Auth(_Base):
         description="computed at the plan level: any enabled duration > lifetime",
     )
 
+    # --- PKCE only -------------------------------------------------------------------------
+    # Registration facts held by the IdP, not runtime-discoverable: Entra rejects any /authorize
+    # whose redirect_uri does not exactly match a pre-registered value, so there is no first
+    # request to observe without already knowing it.
+    authorize_url: str | None = Field(
+        default=None, description="full URL; tenant/realm identifiers live inside this path"
+    )
+    redirect_uri: str | None = Field(
+        default=None, description="must exactly match what is registered with the IdP"
+    )
+    scope: str | None = Field(default=None, description="space-separated if multiple")
+    seed_cookies: list[SeedCookie] = Field(
+        default_factory=list,
+        description="cookies the IdP expects before the flow starts; discovered by observation",
+    )
+    flow_steps: list[Step] = Field(
+        default_factory=list,
+        description=(
+            "The declared login sequence, running between /authorize and the token exchange. "
+            "Declared rather than discovered: parsing an HTML form and guessing which fields are "
+            "credentials would be heuristics stacked on heuristics. The human supplies the "
+            "structure, correlation supplies the values."
+        ),
+    )
+    authorize_extracts: list[Extract] = Field(
+        default_factory=list,
+        description=(
+            "Extractors on the /authorize response. That request is generated rather than "
+            "declared, so it has no Step to carry them - but it is where the login sequence gets "
+            "most of what it sends (sCtx, sFT, canary), so the values have to hang somewhere."
+        ),
+    )
+    code_step_index: int | None = Field(
+        default=None,
+        description=(
+            "Which flow step produces the authorization code. That step is emitted with "
+            "follow_redirects=false so its 302 survives for the Location-header extractor. "
+            "Defaults to the last step when unset."
+        ),
+    )
+
     @model_validator(mode="after")
     def _required_when_authenticated(self) -> Auth:
         if self.type is AuthType.NONE:
@@ -255,7 +310,40 @@ class Auth(_Base):
                     f"auth.static_credential_refs for {self.type} takes at most {limit} "
                     f"reference(s), got {self.static_credential_refs}"
                 )
+        if self.type is AuthType.OAUTH2_PKCE:
+            absent = [
+                f
+                for f in ("authorize_url", "redirect_uri", "scope")
+                if getattr(self, f) is None
+            ]
+            if absent:
+                raise ValueError(
+                    f"auth.{'/'.join(absent)} required for {self.type}: these are registration "
+                    f"facts held by the identity provider and cannot be discovered"
+                )
+            if self.code_step_index is not None:
+                indexes = {step.index for step in self.flow_steps}
+                if self.code_step_index not in indexes:
+                    raise ValueError(
+                        f"auth.code_step_index {self.code_step_index} names no auth flow step; "
+                        f"steps are {sorted(indexes) or 'absent'}"
+                    )
         return self
+
+    @property
+    def code_step(self) -> Step | None:
+        """The auth flow step whose response carries the authorization code.
+
+        The last step by default. Whichever it is, it is emitted with follow_redirects=false: the
+        code arrives in a Location header, and a followed redirect consumes the header before any
+        extractor sees it. Never rely on the redirect URI's scheme to prevent that - a custom
+        scheme happens to be unfollowable, an https one is not, and the failure is silent.
+        """
+        if not self.flow_steps:
+            return None
+        if self.code_step_index is None:
+            return self.flow_steps[-1]
+        return next(s for s in self.flow_steps if s.index == self.code_step_index)
 
 
 # --------------------------------------------------------------------------------------------
@@ -297,6 +385,12 @@ class Step(_Base):
         default_factory=list,
         description="expected_status is authoritative; assertions are derived at emit time",
     )
+
+
+# `Auth.flow_steps` is declared above `Step` so the auth block reads as one unit. Under
+# `from __future__ import annotations` that annotation is a string, and pydantic cannot resolve it
+# until `Step` exists - so the model is rebuilt here, once it does.
+Auth.model_rebuild()
 
 
 class Flow(_Base):

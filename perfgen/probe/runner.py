@@ -29,6 +29,7 @@ from urllib.parse import urlencode
 import httpx
 
 from perfgen import secrets
+from perfgen.correlate import text
 from perfgen.ir.models import (
     AuthType,
     Flow,
@@ -323,6 +324,20 @@ def _run_flow(
         url = f"{base}{path}"
         headers = _step_headers(step, flow, ir, token)
 
+        # The body and the headers carry placeholders too, and until this was wired the body went
+        # out verbatim - a login step posting {"originalRequest":"{sCtx}"} sent that literal text.
+        # They share `seen`, so a value found once is available wherever it is referenced.
+        body, body_bindings, body_fallback, body_unresolved = _resolve_path(
+            step.body or "", seen, preceding
+        )
+        headers, header_bindings, header_fallback, header_unresolved = _resolve_headers(
+            headers, seen, preceding
+        )
+        bindings = {**bindings, **body_bindings, **header_bindings}
+        fallback = [*fallback, *body_fallback, *header_fallback]
+        unresolved = [*unresolved, *body_unresolved, *header_unresolved]
+        body = body or None
+
         call = RecordedCall(
             flow_id=flow.id,
             step_index=step.index,
@@ -331,7 +346,7 @@ def _run_flow(
                 method=step.method.value,
                 url=url,
                 headers=redactor.headers(headers),
-                body=redactor.body(step.body, step.content_type),
+                body=redactor.body(body, step.content_type),
             ),
             placeholder_bindings=bindings,
             fallback_bindings=fallback,
@@ -345,9 +360,7 @@ def _run_flow(
             )
 
         try:
-            response = http.request(
-                step.method.value, url, content=step.body, headers=headers
-            )
+            response = http.request(step.method.value, url, content=body, headers=headers)
         except httpx.HTTPError as exc:
             call.error = f"{type(exc).__name__}: {exc}"
             record.calls.append(call)
@@ -370,7 +383,7 @@ def _run_flow(
         # the flow, and into a fresh `preceding` holding only this step, which is the sole source
         # the bare-`id` fallback is allowed to draw on.
         preceding = {}
-        _index_response(response, preceding)
+        _index_response(response, preceding, wanted=_outstanding(flow.steps, step.index))
         for key, entry in preceding.items():
             seen.setdefault(key, entry)
 
@@ -390,6 +403,46 @@ def _step_headers(step: Step, flow: Flow, ir: TestPlanIR, token: str | None) -> 
         template = ir.auth.value_format or "{token}"
         headers[ir.auth.header_name] = template.replace("{token}", token)
     return headers
+
+
+def _outstanding(steps: list[Step], after_index: int) -> list[str]:
+    """Placeholder names the steps still to come will need.
+
+    Text scanning has to be told what to look for - an HTML page cannot be enumerated the way a
+    JSON body can, but the names the remaining steps reference are a short, known list.
+    """
+    names: list[str] = []
+    for step in steps:
+        if step.index <= after_index:
+            continue
+        for text_field in (step.path, step.body or "", *step.headers.values()):
+            names.extend(_PLACEHOLDER.findall(text_field))
+    return list(dict.fromkeys(names))
+
+
+def _resolve_headers(
+    headers: dict[str, str],
+    seen: dict[str, tuple[str, str]],
+    preceding: dict[str, tuple[str, str]] | None = None,
+) -> tuple[dict[str, str], dict[str, str], list[str], list[str]]:
+    """Fill `{placeholder}` in header values, by the same rules as the path and body.
+
+    The reference Entra login sends `canary`, `hpgid` and `client-request-id` as headers, all of
+    them correlated out of the previous response - so a header with a placeholder is not an edge
+    case here, it is most of the login sequence.
+    """
+    resolved: dict[str, str] = {}
+    bindings: dict[str, str] = {}
+    fallback: list[str] = []
+    unresolved: list[str] = []
+
+    for name, value in headers.items():
+        filled, found, fell_back, missing = _resolve_path(value, seen, preceding)
+        resolved[name] = filled
+        bindings.update(found)
+        fallback.extend(fell_back)
+        unresolved.extend(missing)
+    return resolved, bindings, fallback, unresolved
 
 
 def _resolve_path(
@@ -440,13 +493,41 @@ def _resolve_path(
     return _PLACEHOLDER.sub(replace, path), bindings, fallback, unresolved
 
 
-def _index_response(response: httpx.Response, seen: dict[str, tuple[str, str]]) -> None:
-    """Remember every scalar leaf of a JSON response, keyed by its field name."""
+def _index_response(
+    response: httpx.Response,
+    seen: dict[str, tuple[str, str]],
+    wanted: list[str] | None = None,
+) -> None:
+    """Remember every scalar leaf of a JSON response, keyed by its field name.
+
+    When the body is not JSON and `wanted` names the placeholders a later step still needs, fall
+    back to key-anchored text scanning. An HTML login page is the case this exists for: Entra
+    returns `"sCtx":"…"` inside a script blob, nothing structured can read it, and without this the
+    probe sends `{sCtx}` as literal text and the login fails.
+
+    Text scanning is driven by what is wanted rather than by what the body holds, because an HTML
+    blob cannot be enumerated into leaves while the outstanding placeholder names are a short list.
+    """
     try:
         payload = response.json()
     except (ValueError, json.JSONDecodeError):
+        pass
+    else:
+        _walk(payload, "$", seen)
         return
-    _walk(payload, "$", seen)
+
+    if not wanted:
+        return
+    body = response.text
+    if not body:
+        return
+    for name in wanted:
+        key = normalise_field(name)
+        if key in seen:
+            continue
+        match = text.find_by_key(body, name)
+        if match is not None and text.verify(body, match):
+            seen[key] = (match.value, f"text:{match.key}")
 
 
 def normalise_field(name: str) -> str:

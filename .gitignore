@@ -17,6 +17,13 @@ data/ir/
 # Probe records: real request and response payloads.
 data/probe/
 
+# Hand-built reference scripts. docs/reference/pkce_entra_reference.jmx carries a live Entra
+# tenant id, a client id, an internal hostname and a scope naming a client's service - the same
+# class of thing data/ir/ is excluded for, and this repository is public. The findings taken from
+# it are written up in CLAUDE.md in general terms; the file itself stays local. Untracked from the
+# start, and absent from every commit - keep it that way rather than committing and reverting.
+docs/reference/
+
 # Local working clone of the pipeline repo, created by `perfgen publish`. Someone else's
 # repository checked out inside this one - it is not ours to track, and committing it would nest a
 # second git history here. Listed ahead of the code that creates it, same as .env and data/probe/.

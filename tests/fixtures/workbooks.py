@@ -53,6 +53,13 @@ DEFAULT_APPLICATION: list[tuple[str, str | int | None, str]] = [
     ("Auth header value format", "Bearer {token}", "Bearer {token}"),
     ("Credential reference names", "claims-perf-id\nclaims-perf-secret", "perf-client-id"),
     ("Account model", "Single shared", "Single shared"),
+    # PKCE only. Blank in the template, as they are on the shipped one: they are registration
+    # facts the identity provider holds, and only required when 'Auth type' is 'OAuth2 PKCE'.
+    ("Authorize endpoint URL", None, "https://login.microsoftonline.com/<tenant>/oauth2/v2.0/authorize"),
+    ("Redirect URI", None, "msal<client-id>://auth"),
+    ("Scope", None, "api://example.com/service/Execute"),
+    ("Seed cookies", None, "AADSSO: NA|NoExtension"),
+    ("Seed cookie domain", None, "login.microsoftonline.com"),
 ]
 
 # Labels that sit under the Authentication divider rather than the Application one.
@@ -73,6 +80,18 @@ STEP_HEADERS = [
     "Method",
     "Endpoint path",
     "Request body or parameters",
+    "Request headers",
+    "Expected status",
+]
+
+# Same columns as Flow steps, minus Flow ID - there is one login sequence, not several.
+AUTH_STEP_HEADERS = [
+    "Step no",
+    "Step name",
+    "Method",
+    "Endpoint path",
+    "Request body or parameters",
+    "Request headers",
     "Expected status",
 ]
 PROFILE_HEADERS = [
@@ -92,10 +111,33 @@ DEFAULT_FLOWS = [
 ]
 
 DEFAULT_STEPS = [
-    ["F01", 1, "Search catalogue", "GET", "/catalogue/search?q=widget", None, 200],
-    ["F01", 2, "Open record detail", "GET", "/catalogue/items/{itemId}", None, 200],
-    ["F02", 1, "Create request", "POST", "/requests", '{"type":"standard"}', 201],
-    ["F02", 2, "Check status", "GET", "/requests/{requestRef}/status", None, 200],
+    ["F01", 1, "Search catalogue", "GET", "/catalogue/search?q=widget", None, None, 200],
+    ["F01", 2, "Open record detail", "GET", "/catalogue/items/{itemId}", None, None, 200],
+    ["F02", 1, "Create request", "POST", "/requests", '{"type":"standard"}', None, 201],
+    ["F02", 2, "Check status", "GET", "/requests/{requestRef}/status", None, None, 200],
+]
+
+# The Entra login sequence, shaped like the reference script: scrape the authorize page, post a
+# credential-type probe, then post the login that answers 302 with the code.
+DEFAULT_AUTH_STEPS = [
+    [
+        1,
+        "Get credential type",
+        "POST",
+        "/common/GetCredentialType",
+        '{"username":"u","originalRequest":"{sCtx}","flowToken":"{sFT}"}',
+        "canary: {canary}\nhpgid: {hpgid}",
+        200,
+    ],
+    [
+        2,
+        "Sign in",
+        "POST",
+        "/tenant/login",
+        "login=u&passwd=p&canary={canary}&ctx={sCtx}&flowToken={sFT}",
+        "Content-Type: application/x-www-form-urlencoded",
+        302,
+    ],
 ]
 
 DEFAULT_PROFILES = [
@@ -133,6 +175,9 @@ class WorkbookSpec:
     steps: list[list] = field(default_factory=lambda: [list(r) for r in DEFAULT_STEPS])
     profiles: list[list] = field(default_factory=lambda: [list(r) for r in DEFAULT_PROFILES])
     slas: list[list] = field(default_factory=lambda: [list(r) for r in DEFAULT_SLAS])
+    auth_steps: list[list] | None = None
+    """The `Auth flow steps` sheet. None omits the sheet entirely, which is what a
+    non-PKCE spec looks like and is also how the missing-sheet gap is exercised."""
 
     # Sheet naming
     sheet_names: dict[str, str] = field(
@@ -142,6 +187,7 @@ class WorkbookSpec:
             "steps": "Flow steps",
             "profiles": "Load profiles",
             "sla": "SLA",
+            "auth_steps": "Auth flow steps",
         }
     )
     include_read_me: bool = True
@@ -281,6 +327,10 @@ def write_workbook(path: str | Path, spec: WorkbookSpec | None = None) -> Path:
 
     sla = workbook.create_sheet(spec.sheet_names["sla"])
     _write_table(sla, "sla", SLA_HEADERS, spec.slas, spec)
+
+    if spec.auth_steps is not None:
+        auth_steps = workbook.create_sheet(spec.sheet_names["auth_steps"])
+        _write_table(auth_steps, "auth_steps", AUTH_STEP_HEADERS, spec.auth_steps, spec)
 
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)

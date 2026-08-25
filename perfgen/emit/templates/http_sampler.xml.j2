@@ -16,7 +16,10 @@
   <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
   <stringProp name="HTTPSampler.path">{{ path }}</stringProp>
   <stringProp name="HTTPSampler.method">{{ method }}</stringProp>
-  <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+  {# Explicit on every sampler. The step that produces an OAuth authorization code needs this
+     false so its 302 survives for the Location-header extractor - and it must be stated, never
+     inherited from a redirect URI that happens to use an unfollowable custom scheme. #}
+  <boolProp name="HTTPSampler.follow_redirects">{{ follow_redirects | default("true") }}</boolProp>
   <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
   <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
   <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>

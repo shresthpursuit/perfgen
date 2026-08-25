@@ -224,14 +224,47 @@ def _static_spec(auth_label: str, refs: str | None) -> WorkbookSpec:
     return spec
 
 
-def test_pkce_is_refused_with_the_alternative_named(tmp_path):
+def test_pkce_is_no_longer_refused_outright(tmp_path):
+    """It used to be blocked at parse time on the reasoning that it needs a browser.
+
+    That conflated PKCE's cryptography, which is pure computation, with its login step, which is
+    ordinary HTTP. Both are automatable, and a confirmed-working reference script proves it. What
+    remains blocking is the registration facts the identity provider holds - see below.
+    """
     spec = set_application_value(WorkbookSpec(), "Auth type", "OAuth2 PKCE")
     result = parse_workbook(write_workbook(tmp_path / "spec.xlsx", spec))
 
-    gap = next(g for g in result.blocking if g.field == "auth.type")
-    assert "browser redirect" in gap.message
-    assert "Bearer static" in gap.message
-    assert "Application, row" in gap.message
+    assert not [g for g in result.blocking if g.field == "auth.type"]
+    assert not any("browser redirect" in g.message for g in result.blocking)
+
+
+@pytest.mark.parametrize(
+    "attribute,label",
+    [
+        ("authorize_url", "Authorize endpoint URL"),
+        ("redirect_uri", "Redirect URI"),
+        ("scope", "Scope"),
+    ],
+)
+def test_pkce_registration_facts_are_blocking_and_say_where_to_get_them(
+    tmp_path, attribute, label
+):
+    """A gap that only says 'required' stalls; one that says where to look gets filled."""
+    spec = set_application_value(WorkbookSpec(), "Auth type", "OAuth2 PKCE")
+    result = parse_workbook(write_workbook(tmp_path / "spec.xlsx", spec))
+
+    gap = next(g for g in result.blocking if g.field == f"auth.{attribute}")
+    assert label in gap.message
+    assert "App registrations" in gap.message
+    assert "cannot be discovered" in gap.message
+
+
+def test_pkce_without_an_auth_flow_steps_sheet_is_blocking(tmp_path):
+    spec = set_application_value(WorkbookSpec(), "Auth type", "OAuth2 PKCE")
+    result = parse_workbook(write_workbook(tmp_path / "spec.xlsx", spec))
+
+    gap = next(g for g in result.blocking if g.field == "auth.flow_steps")
+    assert "Auth flow steps" in gap.message
 
 
 def test_static_auth_without_a_credential_reference_is_blocking(tmp_path):

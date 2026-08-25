@@ -32,6 +32,7 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from perfgen.correlate import text as text_scan
 from perfgen.correlate.bodies import FALLBACK_ORDER, parse_body
 from perfgen.correlate.models import Candidate, Rejection, ScanResult, UnreadableBody
 from perfgen.probe.records import ProbeRecord, RecordedCall
@@ -192,6 +193,60 @@ def declared_bindings(record: ProbeRecord) -> dict[tuple[int, str], str]:
     return bindings
 
 
+TEXT_FORMAT = "text"
+
+# Below this a token is not worth searching for: the low-entropy filter would reject it anyway,
+# and short strings collide constantly in a page full of markup.
+_MIN_TEXT_TOKEN = 8
+
+# What separates one value from another in a request. Deliberately generous - this only has to
+# produce a candidate list to search for, and anything it splits wrongly simply is not found.
+_TOKEN_SPLIT = re.compile(r"""[&=?/"'{}\[\]:,;<>\s|]+""")
+
+
+def _wanted_by_later_calls(calls: list[RecordedCall], after: int) -> list[str]:
+    """Values the requests after `after` actually carry, longest first.
+
+    Text scanning has to be driven from the request side. A structured body can be enumerated into
+    leaves; an HTML page cannot, so asking "does this body contain that value" is the only
+    tractable direction - and it is the more precise one, because a correlation is by definition a
+    value that shows up again later.
+    """
+    tokens: set[str] = set()
+    for later in calls[after + 1 :]:
+        for value in request_text(later).values():
+            if not value or value == REDACTED:
+                continue
+            tokens.update(
+                token for token in _TOKEN_SPLIT.split(value) if len(token) >= _MIN_TEXT_TOKEN
+            )
+    # Longest first, so a value containing another is matched whole rather than in fragments.
+    return sorted(tokens, key=len, reverse=True)
+
+
+def _text_values(call: RecordedCall, wanted: list[str]) -> list[tuple[str, str, str]]:
+    """Values found in an unparseable body, located by a verified boundary expression.
+
+    The location returned is the extractor itself - `left||right` - because unlike a JSON path,
+    raw text gives a byte offset, and a byte offset is not something JMeter can read back.
+    """
+    body = call.response.body if call.response else None
+    if not body:
+        return []
+
+    found: list[tuple[str, str, str]] = []
+    claimed: set[str] = set()
+    for token in wanted:
+        if token in claimed:
+            continue
+        match = text_scan.find_value(body, token)
+        if match is None or not text_scan.verify(body, match):
+            continue
+        found.append(("response_body", f"{match.left}||{match.right}", token))
+        claimed.add(token)
+    return found
+
+
 def find_candidates(record: ProbeRecord) -> ScanResult:
     """Scan a traffic record for values produced by one call and reused by a later one."""
     result = ScanResult()
@@ -204,13 +259,25 @@ def find_candidates(record: ProbeRecord) -> ScanResult:
     formats: dict[int, str] = {}
     for position, call in enumerate(calls):
         response = response_values(call)
-        indexed.append(response.values)
-        formats[position] = response.body_format
+        values = response.values
+        body_format = response.body_format
+
         if response.unreadable is not None:
-            result.unreadable.append(response.unreadable)
+            # No parser could read it. Before recording that as a dead end, try locating the values
+            # the later requests carry - this is the HTML login page case, where the whole login
+            # sequence depends on three strings inside a script blob.
+            recovered = _text_values(call, _wanted_by_later_calls(calls, position))
+            if recovered:
+                values = [*values, *recovered]
+                body_format = TEXT_FORMAT
+            else:
+                result.unreadable.append(response.unreadable)
+
+        indexed.append(values)
+        formats[position] = body_format
         if response.mismatch is not None:
             result.mismatches.append(f"{call.name}: {response.mismatch}")
-        for _, _, value in response.values:
+        for _, _, value in values:
             appearances.setdefault(value, set()).add(position)
 
     next_id = 1

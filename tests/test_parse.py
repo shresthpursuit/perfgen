@@ -401,7 +401,7 @@ def test_flow_with_no_steps_is_blocking(tmp_path):
 
 def test_steps_for_an_unknown_flow_warn_and_are_ignored(tmp_path):
     spec = WorkbookSpec()
-    spec.steps.append(["F99", 1, "Orphan", "GET", "/orphan", None, 200])
+    spec.steps.append(["F99", 1, "Orphan", "GET", "/orphan", None, None, 200])
     result = parse(tmp_path, spec)
     gap = gap_for(result, "flows.F99")
     assert gap is not None and gap.severity is Severity.WARNING
@@ -424,7 +424,7 @@ def test_invalid_method_is_blocking(tmp_path):
 
 def test_missing_expected_status_defaults_to_200_with_a_warning(tmp_path):
     spec = WorkbookSpec()
-    spec.steps[0][6] = None
+    spec.steps[0][7] = None
     result = parse(tmp_path, spec)
     gap = gap_for(result, "flows.F01.steps.expected_status")
     assert gap is not None and gap.severity is Severity.WARNING

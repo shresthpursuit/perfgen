@@ -31,6 +31,7 @@ from perfgen.ir.models import (
     ProbeProvenance,
     ProfileId,
     Provenance,
+    SeedCookie,
     Severity,
     Sla,
     Step,
@@ -61,6 +62,7 @@ from perfgen.probe.redact import is_sensitive_key
 APPLICATION_SHEET = ("Application",)
 FLOWS_SHEET = ("Flows", "Flow")
 STEPS_SHEET = ("Flow steps", "Flow Steps", "Steps")
+AUTH_STEPS_SHEET = ("Auth flow steps", "Auth Flow Steps", "Auth steps")
 PROFILES_SHEET = ("Load profiles", "Load Profiles", "Load profile")
 SLA_SHEET = ("SLA", "SLAs", "Service levels")
 
@@ -128,7 +130,10 @@ def parse_workbook(path: str | Path) -> ParseResult:
     collector = _Collector()
     workbook = load_workbook(source, data_only=True, read_only=False)
 
-    application, auth = _parse_application(workbook, collector)
+    application, auth, declared_auth_type = _parse_application(workbook, collector)
+    if declared_auth_type is AuthType.OAUTH2_PKCE:
+        # A separate sheet, so it cannot be read inside _parse_application with the rest of auth.
+        auth.flow_steps = _parse_auth_steps(workbook, collector)
     flows = _parse_flows(workbook, collector)
     profiles = _parse_profiles(workbook, collector)
     slas = _parse_sla(workbook, collector)
@@ -181,12 +186,20 @@ def parse_workbook(path: str | Path) -> ParseResult:
 # --------------------------------------------------------------------------------------------
 
 
-def _parse_application(workbook, collector: _Collector) -> tuple[Application | None, Auth]:
+def _parse_application(
+    workbook, collector: _Collector
+) -> tuple[Application | None, Auth, AuthType]:
+    """Returns the declared auth type alongside the Auth.
+
+    The two differ when required auth fields are missing: `Auth` validation raises and the
+    fallback is `AuthType.NONE`, which would hide from the caller that the spec said PKCE and
+    therefore still owes an 'Auth flow steps' sheet.
+    """
     fallback_auth = Auth(type=AuthType.NONE)
     sheet = find_sheet(workbook, *APPLICATION_SHEET)
     if sheet is None:
         collector.missing_sheet("Application")
-        return None, fallback_auth
+        return None, fallback_auth, AuthType.NONE
 
     header = find_header_row(sheet, ["Attribute", "Value"])
     if header is None or not header.has("Value"):
@@ -195,7 +208,7 @@ def _parse_application(workbook, collector: _Collector) -> tuple[Application | N
             "The 'Application' sheet has no 'Value' column header. Values are read from the "
             "column headed 'Value' - the 'Example' column is guidance only and is never used.",
         )
-        return None, fallback_auth
+        return None, fallback_auth, AuthType.NONE
 
     labelled = LabelledSheet(sheet, header)
 
@@ -220,10 +233,10 @@ def _parse_application(workbook, collector: _Collector) -> tuple[Application | N
         )
         base_url = None
 
-    auth = _parse_auth(labelled, collector)
+    auth, declared_type = _parse_auth(labelled, collector)
 
     if name is None or base_url is None:
-        return None, auth
+        return None, auth, declared_type
 
     application = Application(
         name=name,
@@ -232,7 +245,43 @@ def _parse_application(workbook, collector: _Collector) -> tuple[Application | N
         api_reference=cell_text(labelled.get("API reference location")),
         additional_headers=_parse_additional_headers(labelled, collector, auth),
     )
-    return application, auth
+    return application, auth, declared_type
+
+
+def _parse_header_lines(
+    raw: str | None, collector: _Collector, field: str, location: str, what: str = "header"
+) -> dict[str, str]:
+    """`Name: value` per line, into a mapping. Shared by step headers and seed cookies.
+
+    Splits on the first colon only, because values legitimately contain them - a URL, a timestamp,
+    the `https://...` of a Referer. Every problem is a warning: the field is optional, but nothing
+    is dropped silently, because a header the user meant to send and which quietly went missing
+    surfaces much later as an unexplained 400.
+    """
+    parsed: dict[str, str] = {}
+    if raw is None:
+        return parsed
+
+    for line in values.as_lines(raw):
+        name, separator, value = line.partition(":")
+        name, value = name.strip(), value.strip()
+
+        if not separator or not name:
+            collector.warning(
+                field,
+                f"{location}: {line!r} is not a {what}. Write one per line as "
+                f"'Name: value'. This line is ignored.",
+            )
+            continue
+        if name in parsed:
+            collector.warning(
+                field,
+                f"{location}: {what} {name!r} is listed more than once. The first value is used "
+                f"and the later one ignored.",
+            )
+            continue
+        parsed[name] = value
+    return parsed
 
 
 def _parse_additional_headers(
@@ -301,7 +350,7 @@ def _normalise_base_path(value: str | None) -> str | None:
     return path if path.startswith("/") else f"/{path}"
 
 
-def _parse_auth(labelled: LabelledSheet, collector: _Collector) -> Auth:
+def _parse_auth(labelled: LabelledSheet, collector: _Collector) -> tuple[Auth, AuthType]:
     raw_type = labelled.get("Auth type")
     auth_type = values.lookup(AUTH_TYPES, raw_type)
 
@@ -339,7 +388,7 @@ def _parse_auth(labelled: LabelledSheet, collector: _Collector) -> Auth:
                 + ") are empty. Whether they are required depends on 'Auth type', so they will "
                 "be checked once that is set."
             )
-        return Auth(type=AuthType.NONE)
+        return Auth(type=AuthType.NONE), AuthType.NONE
 
     raw_model = labelled.get("Account model")
     strategy = values.lookup(ACCOUNT_MODELS, raw_model)
@@ -349,10 +398,19 @@ def _parse_auth(labelled: LabelledSheet, collector: _Collector) -> Auth:
             f"{_where('Application', labelled.row_of('Account model'))}: 'Account model' is "
             f"{cell_text(raw_model)!r}. Use 'Single shared' or 'One per user'.",
         )
-        strategy = AuthStrategy.SHARED_SETUP
+        # Still a blocking gap; this only keeps parsing going. PKCE falls back the other way
+        # because that is the shape its reference actually ran - see the strategy note below.
+        strategy = (
+            AuthStrategy.PER_THREAD
+            if auth_type is AuthType.OAUTH2_PKCE
+            else AuthStrategy.SHARED_SETUP
+        )
 
     if auth_type is AuthType.NONE:
-        return Auth(type=AuthType.NONE, strategy=strategy or AuthStrategy.SHARED_SETUP)
+        return (
+            Auth(type=AuthType.NONE, strategy=strategy or AuthStrategy.SHARED_SETUP),
+            AuthType.NONE,
+        )
 
     header_name = cell_text(labelled.get("Auth header name"))
     value_format = cell_text(labelled.get("Auth header value format"))
@@ -375,21 +433,6 @@ def _parse_auth(labelled: LabelledSheet, collector: _Collector) -> Auth:
             f"placeholder, so the token will not be substituted into the header.",
         )
 
-    if auth_type is AuthType.OAUTH2_PKCE:
-        # PKCE needs a code_verifier, an /authorize redirect, an interactive login and an
-        # authorization code before any token call. The workbook cannot express an authorize URL
-        # or a redirect URI, and driving a browser is an explicit non-goal - so say that here
-        # rather than sending a request that is certain to be rejected and reporting it as if the
-        # credentials were wrong.
-        collector.blocking(
-            "auth.type",
-            f"{_where('Application', labelled.row_of('Auth type'))}: 'Auth type' is "
-            f"'OAuth2 PKCE'. That flow cannot be run unattended - it needs a browser redirect "
-            f"and someone to log in interactively - so the framework cannot obtain a token for "
-            f"it. If the token can be obtained another way, set 'Auth type' to 'Bearer static' "
-            f"and put the name it is stored under in 'Credential reference names'.",
-        )
-
     token_request = None
     token_extract = None
     static_refs: list[str] = []
@@ -409,20 +452,89 @@ def _parse_auth(labelled: LabelledSheet, collector: _Collector) -> Auth:
             f"'Token lifetime (seconds)' is not a whole number of seconds.",
         )
 
+    pkce: dict[str, object] = {}
+    if auth_type is AuthType.OAUTH2_PKCE:
+        pkce = _parse_pkce_fields(labelled, collector)
+
     try:
-        return Auth(
+        built = Auth(
             type=auth_type,
-            strategy=strategy or AuthStrategy.SHARED_SETUP,
+            # PKCE defaults to per_thread: the confirmed-working reference runs the whole exchange
+            # inside the load thread group, once per virtual user, and that is the shape that has
+            # actually reached a token against a live tenant. shared_setup stays available when a
+            # spec asks for it - one login is gentler on an IdP at high user counts - but it is
+            # not the default, because it is the shape nobody has run.
+            strategy=strategy
+            or (
+                AuthStrategy.PER_THREAD
+                if auth_type is AuthType.OAUTH2_PKCE
+                else AuthStrategy.SHARED_SETUP
+            ),
             token_request=token_request,
             token_extract=token_extract,
             static_credential_refs=static_refs,
             lifetime_seconds=lifetime,
             header_name=header_name,
             value_format=value_format,
+            **pkce,
         )
     except ValueError:
         # Required auth fields are already reported above; fall back so parsing can continue.
-        return Auth(type=AuthType.NONE)
+        # The declared type still travels with it: a PKCE spec that failed validation here
+        # nevertheless owes an 'Auth flow steps' sheet, and the caller has to know that.
+        return Auth(type=AuthType.NONE), auth_type
+    return built, auth_type
+
+
+def _parse_pkce_fields(labelled: LabelledSheet, collector: _Collector) -> dict[str, object]:
+    """The three registration facts PKCE needs, plus optional seed cookies.
+
+    These cannot be discovered. Entra rejects any `/authorize` whose `redirect_uri` does not
+    exactly match a pre-registered value, so there is no first request to observe without already
+    knowing it. The gap message therefore names *where to obtain* each one rather than only saying
+    it is required - that is the difference between a spec that gets completed and one that stalls.
+    """
+    where_to_look = (
+        "Ask the team that owns the app registration. In Azure: App registrations -> your app -> "
+        "Authentication -> Redirect URIs; 'Scope' and the tenant id in the authorize URL come from "
+        "the same registration."
+    )
+
+    parsed: dict[str, object] = {}
+    for label, attribute in (
+        ("Authorize endpoint URL", "authorize_url"),
+        ("Redirect URI", "redirect_uri"),
+        ("Scope", "scope"),
+    ):
+        text = cell_text(labelled.get(label))
+        if text:
+            parsed[attribute] = text
+        else:
+            collector.blocking(
+                f"auth.{attribute}",
+                f"{_where('Application', labelled.row_of(label))}: '{label}' is required when "
+                f"'Auth type' is 'OAuth2 PKCE'. It is a registration fact held by the identity "
+                f"provider, so it cannot be discovered by probing. {where_to_look}",
+            )
+
+    label = "Seed cookies"
+    location = _where("Application", labelled.row_of(label))
+    domain = cell_text(labelled.get("Seed cookie domain"))
+    cookies = _parse_header_lines(
+        cell_text(labelled.get(label)), collector, "auth.seed_cookies", location, what="cookie"
+    )
+    if cookies and not domain:
+        collector.warning(
+            "auth.seed_cookies",
+            f"{location}: 'Seed cookies' are listed but 'Seed cookie domain' is empty, so there "
+            f"is no host to send them to. They are ignored.",
+        )
+    elif cookies:
+        parsed["seed_cookies"] = [
+            SeedCookie(name=name, value=value, domain=domain)
+            for name, value in cookies.items()
+        ]
+    return parsed
 
 
 def _parse_static_credentials(
@@ -616,6 +728,108 @@ def _parse_flows(workbook, collector: _Collector) -> list[Flow]:
     return flows
 
 
+def _parse_auth_steps(workbook, collector: _Collector) -> list[Step]:
+    """The declared login sequence, read only when the auth type is PKCE.
+
+    Same shape as `Flow steps` minus the `Flow ID` column - there is one sequence, not several.
+    `{placeholder}` works exactly as it does there, and correlation discovers what fills it.
+    """
+    sheet = find_sheet(workbook, *AUTH_STEPS_SHEET)
+    if sheet is None:
+        collector.blocking(
+            "auth.flow_steps",
+            "'Auth type' is 'OAuth2 PKCE' but there is no 'Auth flow steps' sheet. PKCE needs the "
+            "login sequence that runs between /authorize and the token exchange - one row per "
+            "request, in the order a browser would make them.",
+        )
+        return []
+
+    header = find_header_row(sheet, ["Step no", "Endpoint path"])
+    key_column = header.column_of("Step no") if header else None
+    if header is None or key_column is None:
+        collector.blocking(
+            "auth.flow_steps",
+            "The 'Auth flow steps' sheet has no 'Step no' column header, so its rows cannot be "
+            "read.",
+        )
+        return []
+
+    collected: list[Step] = []
+    for row_index, cells in iter_data_rows(sheet, header, key_column=key_column):
+        location = _where("Auth flow steps", row_index)
+
+        step_no = values.as_int(cells.get(key_column))
+        if step_no is None or step_no < 1:
+            collector.blocking(
+                "auth.flow_steps.index",
+                f"{location}: 'Step no' is empty or not a positive whole number.",
+            )
+            continue
+
+        path = _column_text(cells, header, "Endpoint path")
+        if path is None:
+            collector.blocking("auth.flow_steps.path", f"{location}: 'Endpoint path' is empty.")
+            continue
+
+        raw_method = _column_text(cells, header, "Method")
+        method = values.lookup(METHODS, raw_method)
+        if method is None:
+            collector.blocking(
+                "auth.flow_steps.method",
+                f"{location}: 'Method' is {raw_method!r}; expected one of "
+                f"{', '.join(m.value for m in METHODS.values())}.",
+            )
+            continue
+
+        expected_status = values.as_int(_column_value(cells, header, "Expected status"))
+        if expected_status is None:
+            expected_status = 200
+            collector.warning(
+                "auth.flow_steps.expected_status",
+                f"{location}: 'Expected status' is empty; the script will assert 200. A login "
+                f"step that ends in a redirect usually answers 302.",
+            )
+
+        body = _column_text(cells, header, "Request body or parameters")
+        collected.append(
+            Step(
+                index=step_no,
+                name=_column_text(cells, header, "Step name") or f"auth step {step_no}",
+                method=method,
+                path=path,
+                body=body,
+                content_type=values.infer_content_type(body),
+                expected_status=expected_status,
+                headers=_parse_header_lines(
+                    _column_text(cells, header, "Request headers"),
+                    collector,
+                    "auth.flow_steps.headers",
+                    location,
+                ),
+            )
+        )
+
+    if not collected:
+        collector.blocking(
+            "auth.flow_steps",
+            "The 'Auth flow steps' sheet has no usable rows. PKCE needs at least one login step "
+            "between /authorize and the token exchange.",
+        )
+        return []
+
+    indices = [step.index for step in collected]
+    duplicates = sorted({i for i in indices if indices.count(i) > 1})
+    if duplicates:
+        collector.blocking(
+            "auth.flow_steps.index",
+            f"'Auth flow steps' repeats 'Step no' {', '.join(str(d) for d in duplicates)}. Each "
+            f"step needs its own number - the order they run in is the order they are numbered.",
+        )
+        return []
+
+    return sorted(collected, key=lambda s: s.index)
+
+
 def _parse_steps(workbook, collector: _Collector) -> dict[str, list[Step]]:
     sheet = find_sheet(workbook, *STEPS_SHEET)
     if sheet is None:
@@ -682,6 +896,12 @@ def _parse_steps(workbook, collector: _Collector) -> dict[str, list[Step]]:
             body=body,
             content_type=values.infer_content_type(body),
             expected_status=expected_status,
+            headers=_parse_header_lines(
+                _column_text(cells, header, "Request headers"),
+                collector,
+                f"flows.{flow_id}.steps.headers",
+                location,
+            ),
         )
         collected.setdefault(flow_id, []).append((row_index, step))
 

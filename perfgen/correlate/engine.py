@@ -25,7 +25,7 @@ from perfgen.correlate.models import (
     ScanResult,
     confidence_for,
 )
-from perfgen.correlate.scan import find_candidates
+from perfgen.correlate.scan import TEXT_FORMAT, find_candidates
 from perfgen.ir.models import Confidence, Extract, ExtractorType, Scope, Source, TestPlanIR
 from perfgen.probe.records import ProbeRecord
 
@@ -144,7 +144,7 @@ def _write_extract(
         Extract(
             var=decision.var,
             source=candidate.as_ir_source(),
-            extractor=decision.extractor,
+            extractor=_extractor_for(candidate, decision),
             expr=_expression_for(candidate, decision),
             scope=decision.scope,
             confidence=confidence,
@@ -158,6 +158,18 @@ def _write_extract(
     return True
 
 
+def _extractor_for(candidate: Candidate, decision: Adjudication) -> ExtractorType:
+    """Which extractor reads this candidate back.
+
+    Normally the model's choice. Not for a value found by text scanning: nothing but a boundary
+    extractor can read a body no parser could parse, so that is a fact about the body rather than a
+    judgement about the correlation - and the model is only ever asked to judge correlations.
+    """
+    if candidate.body_format == TEXT_FORMAT:
+        return ExtractorType.BOUNDARY
+    return decision.extractor
+
+
 def _expression_for(candidate: Candidate, decision: Adjudication) -> str:
     """The extractor expression, taken from where the scan actually found the value.
 
@@ -165,6 +177,12 @@ def _expression_for(candidate: Candidate, decision: Adjudication) -> str:
     why the body walkers produce them in that form. Form-encoded bodies have no JMeter extractor
     of their own, so the parameter name is turned into a regex here instead.
     """
+    if candidate.body_format == TEXT_FORMAT:
+        # Already `left||right`, synthesised from the response and verified against it. Not the
+        # request-side window below: context taken from the request can include a neighbouring
+        # value that changes every run, which yields an extractor that works once.
+        return candidate.source_location
+
     if decision.extractor in (ExtractorType.JSON_PATH, ExtractorType.XPATH, ExtractorType.HEADER):
         return candidate.source_location
 

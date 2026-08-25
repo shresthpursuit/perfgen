@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlencode
 
 import yaml
 
@@ -87,6 +88,13 @@ def _baseline_plan(ir: TestPlanIR, plans: dict[str, ProfilePlan]) -> ProfilePlan
 def _scope_index(ir: TestPlanIR) -> dict[str, Scope]:
     """Map every extracted variable name to the scope it was extracted at."""
     scopes: dict[str, Scope] = {}
+    # The auth sequence first: a PKCE login extracts most of what it then sends, and leaving these
+    # out leaves every {sCtx} in the emitted script unrewritten.
+    for extract in ir.auth.authorize_extracts:
+        scopes[extract.var] = extract.scope
+    for step in ir.auth.flow_steps:
+        for extract in step.extracts:
+            scopes[extract.var] = extract.scope
     for flow in ir.flows:
         for step in flow.steps:
             for extract in step.extracts:
@@ -358,8 +366,228 @@ def _token_sampler(ir: TestPlanIR, warnings: list[str], *, publish_global: bool)
 def _setup_thread_group(ir: TestPlanIR, warnings: list[str]) -> Node:
     """Acquires the shared token once, before the flow groups start."""
     group = node("setup_thread_group", testname="setUp Thread Group - acquire token")
-    group.add(_token_sampler(ir, warnings, publish_global=True))
+    if ir.auth.type is AuthType.OAUTH2_PKCE:
+        for element in _pkce_sequence(ir, warnings, publish_global=True):
+            group.add(element)
+    else:
+        group.add(_token_sampler(ir, warnings, publish_global=True))
     return group
+
+
+# --------------------------------------------------------------------------------------------
+# PKCE
+# --------------------------------------------------------------------------------------------
+
+VERIFIER_VAR = "codeVerifier"
+CHALLENGE_VAR = "codeChallenge"
+CODE_VAR = "authorizationCode"
+
+# 32 bytes, base64url, no padding - RFC 7636 section 4.1. Written as a thread variable and never
+# as a JMeter property: properties are JVM-global, so promoting these would have every thread
+# overwrite the same pair and a thread could send challenge A to /authorize and verifier B to
+# /token. The reference script does exactly that and only survives because it runs one thread.
+_VERIFIER_SCRIPT = """import java.security.SecureRandom
+
+byte[] bytes = new byte[32]
+new SecureRandom().nextBytes(bytes)
+vars.put('{verifier}', Base64.getUrlEncoder().withoutPadding().encodeToString(bytes))"""
+
+_CHALLENGE_SCRIPT = """import java.security.MessageDigest
+
+byte[] digest = MessageDigest.getInstance('SHA-256')
+    .digest(vars.get('{verifier}').getBytes('US-ASCII'))
+vars.put('{challenge}', Base64.getUrlEncoder().withoutPadding().encodeToString(digest))"""
+
+
+def _pkce_sequence(ir: TestPlanIR, warnings: list[str], *, publish_global: bool) -> list[Node]:
+    """The whole PKCE exchange: derive, authorize, log in, trade the code for a token.
+
+    Returned as a flat list so the caller decides where it sits - a setUp group for `shared_setup`,
+    or inside a Once Only Controller in each flow group for `per_thread`.
+    """
+    auth = ir.auth
+    elements: list[Node] = [
+        node(
+            "jsr223_sampler",
+            testname="Generate code_verifier",
+            script=_VERIFIER_SCRIPT.format(verifier=VERIFIER_VAR),
+        ),
+        node(
+            "jsr223_sampler",
+            testname="Derive code_challenge",
+            script=_CHALLENGE_SCRIPT.format(verifier=VERIFIER_VAR, challenge=CHALLENGE_VAR),
+        ),
+    ]
+
+    if auth.seed_cookies:
+        elements.append(
+            node(
+                "cookie_manager",
+                cookies=auth.seed_cookies,
+                clear_each_iteration="false",
+            )
+        )
+
+    controller = node("transaction_controller", testname="authenticate", parent=False)
+    controller.add(_authorize_sampler(ir))
+    for step in auth.flow_steps:
+        controller.add(_auth_flow_sampler(ir, step))
+    controller.add(_pkce_token_sampler(ir, warnings, publish_global=publish_global))
+    elements.append(controller)
+    return elements
+
+
+def _authorize_sampler(ir: TestPlanIR) -> Node:
+    """GET /authorize with the RFC parameters. Returns the login page, not a redirect."""
+    auth = ir.auth
+    protocol, domain, port, path = naming.split_url(auth.authorize_url or "")
+    query = urlencode(
+        {
+            "response_type": "code",
+            "client_id": _pkce_client_id(ir),
+            "scope": auth.scope or "",
+            "redirect_uri": auth.redirect_uri or "",
+            "code_challenge": f"${{{CHALLENGE_VAR}}}",
+            "code_challenge_method": "S256",
+        },
+        safe="${}",
+    )
+    sampler = node(
+        "http_sampler",
+        testname="Authorize",
+        protocol=protocol,
+        domain=domain,
+        port=port,
+        path=f"{path}?{query}",
+        method="GET",
+        body="",
+        connect_timeout_ms=CONNECT_TIMEOUT_MS,
+        response_timeout_ms=RESPONSE_TIMEOUT_MS,
+    )
+    scopes = _scope_index(ir)
+    for extract in auth.authorize_extracts:
+        for element in _extractor_node(extract, scopes):
+            sampler.add(element)
+    sampler.add(_assertion_node(200, "Authorize succeeded"))
+    return sampler
+
+
+def _auth_flow_sampler(ir: TestPlanIR, step: Step) -> Node:
+    """One declared login step, with its extractors and headers.
+
+    The step that produces the authorization code gets `follow_redirects=false` and a
+    header-scoped extractor: the code arrives in a Location header, and a followed redirect
+    consumes it before anything can read it.
+    """
+    scopes = _scope_index(ir)
+    protocol, domain, port, path = naming.split_url(step.path) if "://" in step.path else (
+        *naming.split_url(ir.auth.authorize_url or "")[:3],
+        step.path,
+    )
+    is_code_step = ir.auth.code_step is not None and step.index == ir.auth.code_step.index
+
+    sampler = node(
+        "http_sampler",
+        testname=step.name,
+        protocol=protocol,
+        domain=domain,
+        port=port,
+        path=rewrite_placeholders(path, scopes),
+        method=step.method.value,
+        body=rewrite_placeholders(step.body or "", scopes),
+        follow_redirects="false" if is_code_step else "true",
+        connect_timeout_ms=CONNECT_TIMEOUT_MS,
+        response_timeout_ms=RESPONSE_TIMEOUT_MS,
+    )
+
+    # Rewrite after merging, not before: _content_type_headers re-reads step.headers, so rewriting
+    # first and merging second puts the raw {placeholder} straight back.
+    headers = {
+        name: rewrite_placeholders(value, scopes)
+        for name, value in _content_type_headers(step).items()
+    }
+    header_node = _headers_node(headers, f"{step.name} headers")
+    if header_node:
+        sampler.add(header_node)
+
+    for extract in step.extracts:
+        for element in _extractor_node(extract, scopes):
+            sampler.add(element)
+
+    if is_code_step:
+        sampler.add(
+            node(
+                "regex_extractor",
+                testname=f"Extract {CODE_VAR}",
+                var=CODE_VAR,
+                expr="code=([^&]+)",
+                use_headers="true",
+                default_value=EXTRACT_DEFAULT,
+            )
+        )
+    sampler.add(_assertion_node(step.expected_status, f"{step.name} succeeded"))
+    return sampler
+
+
+def _pkce_client_id(ir: TestPlanIR) -> str:
+    """The client id, read from the environment at run time like every other credential."""
+    request = ir.auth.token_request
+    refs = request.credential_refs if request else []
+    matched = naming.match_credential_ref("client_id", refs)
+    return naming.env_lookup(matched or "client_id")
+
+
+def _pkce_token_sampler(ir: TestPlanIR, warnings: list[str], *, publish_global: bool) -> Node:
+    """POST /token, trading the authorization code plus the verifier for an access token."""
+    auth = ir.auth
+    token = auth.token_extract
+    request = auth.token_request
+    assert token is not None and request is not None  # guaranteed by Auth validation
+
+    protocol, domain, port, path = naming.split_url(request.url)
+    body = urlencode(
+        {
+            "grant_type": "authorization_code",
+            "code": f"${{{CODE_VAR}}}",
+            "redirect_uri": auth.redirect_uri or "",
+            "code_verifier": f"${{{VERIFIER_VAR}}}",
+            "client_id": _pkce_client_id(ir),
+        },
+        safe="${}()'",
+    )
+
+    sampler = node(
+        "http_sampler",
+        testname="Exchange code for token",
+        protocol=protocol,
+        domain=domain,
+        port=port,
+        path=path,
+        method="POST",
+        body=body,
+        connect_timeout_ms=CONNECT_TIMEOUT_MS,
+        response_timeout_ms=RESPONSE_TIMEOUT_MS,
+    )
+    content_type = _headers_node(
+        {"Content-Type": "application/x-www-form-urlencoded"}, "Token request headers"
+    )
+    if content_type:
+        sampler.add(content_type)
+
+    expr = token.expr or "$.access_token"
+    sampler.add(
+        node(
+            "json_extractor",
+            testname=f"Extract {token.var}",
+            var=token.var,
+            expr=expr,
+            default_value=EXTRACT_DEFAULT,
+        )
+    )
+    if publish_global:
+        sampler.add(_publish_global(token.var))
+    sampler.add(_assertion_node(200, "Token request succeeded"))
+    return sampler
 
 
 def _credential_for(param: str, request, warnings: list[str]) -> str:
@@ -408,9 +636,16 @@ def _flow_thread_group(
     auth_header = _auth_header(ir)
 
     if per_thread_auth:
-        # Every virtual user logs in once on its first iteration and reuses its own token.
+        # Every virtual user logs in once on its first iteration and reuses its own token. The
+        # Once Only Controller is what makes "per thread" mean once per virtual user rather than
+        # once per iteration - without it a soak test re-authenticates every loop and ends up
+        # load-testing the identity provider instead of the API.
         once = group.add(node("once_only_controller", testname="Acquire token (once per user)"))
-        once.add(_token_sampler(ir, warnings, publish_global=False))
+        if ir.auth.type is AuthType.OAUTH2_PKCE:
+            for element in _pkce_sequence(ir, warnings, publish_global=False):
+                once.add(element)
+        else:
+            once.add(_token_sampler(ir, warnings, publish_global=False))
 
     # A group-level Header Manager applies to every sampler in the group, including the token
     # request — which would send an unresolved Authorization header to the auth endpoint. With
