@@ -51,6 +51,12 @@ everywhere else in this tool: the human supplies structure, the machine supplies
 - **Always write commit messages to a file and use `git commit -F <file>`.** Never `-m` with
   inline quoting: `@'...'` is PowerShell here-string syntax and is passed through literally by
   bash, which has twice produced a commit titled `@x`. A message file has no quoting to get wrong.
+- **Never `git add -A`, `git add .`, or any blanket add. Name the paths.** This tree routinely
+  holds untracked files that must never be committed — a spec workbook for a real tenant, a probe
+  record, a hand-built reference script — and a blanket add does not distinguish them from the
+  work. It swept `data/specs/pkce_gate_spec.xlsx` into a commit minutes after that file was
+  declared untracked, and only a check of what the commit contained caught it before the push.
+  Naming paths costs one line and makes the mistake unavailable rather than merely unlikely.
 - **A script that modifies a file restores it in a `finally`, so no destructive git command is
   ever the recovery path.** `git checkout -- <file>` and `git restore` reset to the last *commit*,
   not to the state before the script ran — so reaching for one to undo a temporary patch discards
@@ -160,6 +166,23 @@ everywhere else in this tool: the human supplies structure, the machine supplies
   live Entra tenant — is the proof. What genuinely cannot be automated away is that a
   password-based login needs a real account's credentials; those are references like every other
   secret.
+- **M7's gate is partly passed, and the unproven half is named.** Against a live Entra tenant the
+  probe walks `/authorize` → four declared login steps, resolving every placeholder: `sCtx` (592
+  chars), `sFT` (1215), `canary`, `hpgid`, `hpgact`, `sessionId`, `correlationId` out of an
+  unparseable 43KB HTML body, and `request`/`flowToken`/`ctx`/`flowtoken` out of hidden form inputs
+  across two auto-submitted interstitials — each one verified by execution, not by inspection. No
+  credential value reaches the probe record. Six defects were found this way that no fixture had
+  produced.
+  **Not proven: the token exchange, and the emitted `.jmx` obtaining a token in real JMeter.** The
+  reference tenant enforces device-compliance conditional access. Its chain ends at
+  `/common/DeviceAuthTls/reprocess`, which wants device authentication over a **TLS client
+  certificate** presented during the handshake; nothing is presented, so Entra answers
+  `AADSTS50058` ("a silent sign-in request was sent but no user is signed in") and restarts the
+  flow with a fresh `ConvergedSignIn` page. That is a transport-layer challenge, so no additional
+  declared step can answer it — a step 5 walks the same loop. Closing the gap needs a conditional
+  access exemption on that tenant, or a different PKCE target without device-compliance CA. The
+  reference script's own tenant had no such policy, which is why its `/login` returned a 302
+  directly; the reference still proves PKCE is automatable, just not for this account.
 - **Read the reference for what to copy *and* what not to.** Three of its behaviours are live
   defects in a script that nonetheless works, each now pinned by a test:
   - Its `/login` sampler has **no `follow_redirects` property at all**, so the 302 survives by
