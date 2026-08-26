@@ -29,6 +29,16 @@ everywhere else in this tool: the human supplies structure, the machine supplies
 - **No secret values ever written** to disk, IR, logs, or JMX. Reference names only; the JMX reads
   credentials at run time via `${__groovy(System.getenv('NAME'))}` — `${__env(...)}` is NOT a core
   JMeter function and is silently passed through as literal text.
+- **Redaction scrubs values while they are *decoded*, inbound and outbound — do not "tidy" this
+  into a single pass over the serialised text.** That is what it used to be, and it left a hole:
+  `parse_qsl` decodes and `urlencode` re-encodes, so a password containing `@`, `+`, `/` or `=` —
+  an entirely ordinary generated one — came back out as `p%40ssw0rd%2B…` and the value pass
+  afterwards had nothing to match. `json.dumps` does the same with quotes, backslashes and
+  non-ASCII. Redaction by key name is what hid it for so long: `passwd` was caught by its name
+  while the identical value under `login` went straight through. So `Redactor.body` scrubs the raw
+  text *before* parsing as well as after, and `_redact_json` scrubs every string leaf in place.
+  Pinned by `test_a_secret_under_an_innocuous_form_key_is_caught_by_value` and its neighbours in
+  `tests/test_redact.py`.
 - **The LLM never emits XML**, and never invents a correlation: it only judges candidates the
   deterministic scan already found, against a schema.
 - **Never invent a missing input value.** Missing required input is a `gaps` entry, not a default.
@@ -41,6 +51,16 @@ everywhere else in this tool: the human supplies structure, the machine supplies
 - **Always write commit messages to a file and use `git commit -F <file>`.** Never `-m` with
   inline quoting: `@'...'` is PowerShell here-string syntax and is passed through literally by
   bash, which has twice produced a commit titled `@x`. A message file has no quoting to get wrong.
+- **A script that modifies a file restores it in a `finally`, so no destructive git command is
+  ever the recovery path.** `git checkout -- <file>` and `git restore` reset to the last *commit*,
+  not to the state before the script ran — so reaching for one to undo a temporary patch discards
+  everything uncommitted in that file. That happened: a script patching
+  `perfgen/probe/runner.py` to prove a test fails died before its restore line, and the reflex
+  `git checkout --` that followed wiped a session's uncommitted work in it.
+  The lesson is not "be careful with checkout". It is that the temporary edit and its undo belong
+  in the same `try/finally`, so the file is never left dirty and the destructive command is never
+  reached for. Same for any edit made to prove a test catches what it claims to catch — that is a
+  useful thing to do and this is how to do it safely.
 
 ## Amendments to the brief (authoritative where they conflict)
 
@@ -200,12 +220,6 @@ everywhere else in this tool: the human supplies structure, the machine supplies
   afterwards; `_record_auth_call` takes a `register` callback that runs *after* the request and
   *before* the response is recorded, because the token exchange carries the access token in its
   response body. A first version recorded that body first and wrote the token to disk.
-- **Redaction scrubs values while they are decoded, on the way in as well as out.** Found here:
-  `parse_qsl` decodes and `urlencode` re-encodes, so a password containing `@`, `+`, `/` or `=`
-  came back as `p%40ssw0rd%2B…` and the value pass afterwards had nothing to match. JSON does the
-  same with quotes, backslashes and non-ASCII. Redaction by key name masked it — `passwd` was
-  caught by its name while the same value under `login` went straight through. Fixed in
-  `Redactor.body`/`_redact_json`; pinned by `test_a_secret_under_an_innocuous_form_key_is_caught_by_value`.
 - **`Request headers` is a column on both `Flow steps` and `Auth flow steps`.** `Step.headers`
   existed in the IR and the emitter already wrote per-step `HeaderManager`s — only the parser never
   filled it. Needed independently of PKCE: a flow step carrying a correlated header was previously
