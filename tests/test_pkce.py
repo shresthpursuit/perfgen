@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 
 import pytest
 
@@ -435,3 +436,23 @@ def test_the_references_are_discoverable_for_the_secrets_scan():
 
     ir = with_login_credentials()
     assert "pkce-login-password" in declared_references(ir)
+
+
+def test_a_spec_spelling_content_type_differently_does_not_get_two():
+    """Header names are case-insensitive; dict.setdefault is not.
+
+    A step writing `Content-type` used to get a second `Content-Type` beside it, and Entra answers
+    a request carrying two with `400 Bad Request - Invalid Header` - which reads as a problem with
+    the body or the credentials and is neither. Found on a live tenant.
+    """
+    ir = build_pkce_ir()
+    step = ir.auth.flow_steps[0]
+    step.headers = {"Content-type": "application/json; charset=UTF-8"}
+    step.content_type = "application/json"
+
+    xml = build_tree(ir, "5.6.3")[0].decode()
+    block = xml.split(f'testname="{step.name} headers"', 1)[1].split("</HeaderManager>", 1)[0]
+
+    names = [n.lower() for n in re.findall(r'name="Header\.name">([^<]+)<', block)]
+    assert names.count("content-type") == 1, f"duplicate Content-Type: {names}"
+    assert "charset=UTF-8" in block, "the spec's own spelling and value should be the one kept"

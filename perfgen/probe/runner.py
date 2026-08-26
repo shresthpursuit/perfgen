@@ -112,6 +112,21 @@ def run_probe(
 # --------------------------------------------------------------------------------------------
 
 
+def _set_content_type(headers: dict[str, str], content_type: str | None) -> None:
+    """Add a Content-Type only if the spec did not already give one, in any spelling.
+
+    Header names are case-insensitive, `dict.setdefault` is not. A spec writing `Content-type`
+    therefore got a second `Content-Type` alongside it, and Entra answers a request carrying two
+    with `400 Bad Request - Invalid Header` - which reads as a problem with the body or the
+    credentials, and is neither.
+    """
+    if not content_type:
+        return
+    if any(name.lower() == "content-type" for name in headers):
+        return
+    headers["Content-Type"] = content_type
+
+
 def _pkce_pair() -> tuple[str, str]:
     """A verifier and its S256 challenge - RFC 7636, the same transformation the JMX performs."""
     verifier = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("=")
@@ -193,7 +208,10 @@ def _record_auth_call(
         name=name,
         request=RecordedRequest(
             method=method,
-            url=url,
+            # Scrubbed like the body and the headers. A query string is an ordinary place for
+            # a credential to travel - OAuth puts client_id in one on every authorize call -
+            # and recording the URL verbatim wrote it straight to disk.
+            url=redactor.scrub(url) or url,
             headers=redactor.headers(headers),
             body=redactor.body(body, headers.get("Content-Type")),
         ),
@@ -234,7 +252,12 @@ def _acquire_pkce_token(
 
     try:
         step_secrets = _register_step_secrets(auth.step_credential_refs, redactor)
+        # Registered like any other resolved reference. It is a public OAuth identifier rather
+        # than a secret, but the spec declared it through `Credential reference names`, and the
+        # rule that a resolved reference never reaches disk does not have an exemption for values
+        # that look harmless - deciding which ones do is exactly the judgement that goes wrong.
         client_id = _pkce_client_credential(ir)
+        redactor.add_secret(client_id)
     except RuntimeError as exc:
         _degrade(record, outcome, str(exc))
         return None
@@ -337,8 +360,7 @@ def _walk_auth_steps(
 
         body_text, _, _, body_unresolved = _resolve_path(step.body or "", seen, seen)
         headers, _, _, header_unresolved = _resolve_headers(step.headers, seen, seen)
-        if step.content_type:
-            headers.setdefault("Content-Type", step.content_type)
+        _set_content_type(headers, step.content_type)
 
         missing = [*unresolved, *body_unresolved, *header_unresolved]
         if missing:
@@ -633,7 +655,7 @@ def _run_flow(
             name=step.name,
             request=RecordedRequest(
                 method=step.method.value,
-                url=url,
+                url=redactor.scrub(url) or url,
                 headers=redactor.headers(headers),
                 body=redactor.body(body, step.content_type),
             ),
@@ -686,8 +708,7 @@ def _step_headers(step: Step, flow: Flow, ir: TestPlanIR, token: str | None) -> 
     guesses - a script whose correlations were never actually verified.
     """
     headers = {**ir.application.additional_headers, **flow.headers, **step.headers}
-    if step.content_type:
-        headers.setdefault("Content-Type", step.content_type)
+    _set_content_type(headers, step.content_type)
     if token and ir.auth.header_name:
         template = ir.auth.value_format or "{token}"
         headers[ir.auth.header_name] = template.replace("{token}", token)

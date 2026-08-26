@@ -17,6 +17,13 @@ data/ir/
 # Probe records: real request and response payloads.
 data/probe/
 
+# Specification workbooks for a real tenant. template.xlsx and sample_filled.xlsx are
+# synthetic and tracked; anything carrying a real tenant id, client id, internal hostname or
+# redirect URI is not. This repository is public - same reasoning as docs/reference/ and
+# data/ir/. Named individually rather than ignoring data/specs/ wholesale, so the synthetic
+# ones stay tracked and a new real spec has to be added here deliberately.
+data/specs/pkce_gate_spec.xlsx
+
 # Hand-built reference scripts. docs/reference/pkce_entra_reference.jmx carries a live Entra
 # tenant id, a client id, an internal hostname and a scope naming a client's service - the same
 # class of thing data/ir/ is excluded for, and this repository is public. The findings taken from

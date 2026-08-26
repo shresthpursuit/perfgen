@@ -51,6 +51,24 @@ _ANCHOR = re.compile(
 _CLOSERS = ('"', "'", "\\u0026", "&", ",", "<", ";", " ")
 
 
+# A hidden form input: `<input type="hidden" name="request" value="...">`. Not an Entra shape -
+# it is how HTML carries state through an auto-submitted interstitial, and SAML's POST binding
+# looks identical. Two separate attributes, so the `key:value` anchoring above cannot see it: the
+# name and the value are not adjacent, and what sits between them varies by tag.
+#
+# Only `name` before `value` is matched. The reverse order cannot produce a left boundary at all -
+# the value would come first - and offering nothing is the rule when a reliable boundary cannot be
+# built.
+_INPUT_TAG = re.compile(r"<input\b[^>]*>", re.IGNORECASE)
+
+
+def _input_anchor(key_regex: str) -> re.Pattern[str]:
+    return re.compile(
+        r"\bname=(?P<nq>[\"']?)" + key_regex + r"(?P=nq)[^>]*?\bvalue=(?P<vq>[\"'])",
+        re.IGNORECASE,
+    )
+
+
 @dataclass
 class TextMatch:
     """One occurrence of a value in a body, with the context needed to extract it again."""
@@ -76,6 +94,10 @@ def find_value(body: str, value: str) -> TextMatch | None:
     if not body or not value or value not in body:
         return None
 
+    inside_input = _value_in_input(body, value)
+    if inside_input is not None:
+        return inside_input
+
     start = body.find(value)
     preceding = body[max(0, start - _MAX_ANCHOR_DISTANCE) : start]
     anchor = _ANCHOR.search(preceding)
@@ -96,6 +118,24 @@ def find_value(body: str, value: str) -> TextMatch | None:
     )
 
 
+def key_pattern(key: str) -> str:
+    """A pattern matching this key however it is spelled, separators aside.
+
+    `{client_request_id}` has to find `client-request-id=` in the page, because the structured path
+    already works that way - `normalise_field` strips separators from both sides, so `{userId}`
+    finds `user_id`. Matching literally here would mean one placeholder style resolving in one
+    context and not the other, with nothing in either to explain why.
+
+    The key is split on separators *and* on case boundaries, then rejoined allowing any separator
+    between the parts: `sessionId` -> `session[^A-Za-z0-9]*Id`, which finds `sessionId`,
+    `session_id` and `session-id` alike.
+    """
+    parts = re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+", key)
+    if not parts:
+        return re.escape(key)
+    return r"[^A-Za-z0-9]*".join(re.escape(part) for part in parts)
+
+
 def find_by_key(body: str, key: str) -> TextMatch | None:
     """Locate the value a *named* key carries. The probe's direction, not the scan's.
 
@@ -106,14 +146,61 @@ def find_by_key(body: str, key: str) -> TextMatch | None:
     if not body or not key:
         return None
 
-    anchor = re.compile(
-        r'(?P<quote>["\'])?' + re.escape(key) + r'(?P=quote)?\s*[:=]\s*(?P<open>["\'])?',
-        re.IGNORECASE,
-    )
-    found = anchor.search(body)
-    if found is None:
-        return None
+    # Exact spelling first, loosened only if that finds nothing. Specificity matters more than it
+    # looks: `sCtx` loosened to `s[^A-Za-z0-9]*Ctx` also matches `s?ctx=` in a `/reprocess?ctx=`
+    # URL, and on a real login page that decoy sits 3KB *before* the real `"sCtx":"`. Trying the
+    # exact form first means the loose form only ever has to cover the spellings it was added for.
+    patterns = [re.escape(key)]
+    loosened = key_pattern(key)
+    if loosened != patterns[0]:
+        patterns.append(loosened)
 
+    for pattern in patterns:
+        anchor = re.compile(
+            # The key has to sit where a key can sit - after a delimiter, not in the middle of
+            # something. Without this, `canary` matched the literal `CANARY:` *inside the canary's
+            # own value* (`...=7:1:CANARY:g+uu...`) and returned the tail: 44 characters where the
+            # real value is 99. It verified, because that context occurred exactly once. A
+            # plausible, verifiable, silently wrong value is the failure this whole module exists
+            # to avoid, so the anchor must be anchored itself.
+            r"(?<![A-Za-z0-9:_-])"
+            r'(?P<quote>["\'])?' + pattern + r'(?P=quote)?\s*[:=]\s*(?P<open>["\'])?',
+            re.IGNORECASE,
+        )
+        # Every match, not just the first. A document this size will contain near-misses, and the
+        # one that verifies is the answer - taking `search()` and giving up discards the real key
+        # because something vaguely like it appeared earlier.
+        for found in anchor.finditer(body):
+            match = _match_at(body, found, key)
+            if match is not None and verify(body, match):
+                return match
+
+    # Nothing key-shaped carried it. Try a hidden form input, where the name and the value are two
+    # separate attributes and so invisible to the anchoring above.
+    for pattern in patterns:
+        for found in _input_anchor(pattern).finditer(body):
+            match = _input_match_at(body, found, key)
+            if match is not None and verify(body, match):
+                return match
+    return None
+
+
+def _input_match_at(body: str, found: re.Match[str], key: str) -> TextMatch | None:
+    """Build a TextMatch from a `name=... value="` hit inside an `<input>` tag."""
+    left = found.group(0)
+    quote = found.group("vq")
+    start = found.end()
+    end = body.find(quote, start)
+    if end < 0 or end == start:
+        return None
+    value = body[start:end]
+    if len(value) > _MAX_VALUE_LENGTH:
+        return None
+    return TextMatch(value=value, key=key, left=left, right=quote, occurrences=body.count(left))
+
+
+def _match_at(body: str, found: re.Match[str], key: str) -> TextMatch | None:
+    """Build a TextMatch from one anchor hit, or None if no boundary closes it."""
     left = found.group(0)
     start = found.end()
     opened = found.group("open")
@@ -124,9 +211,7 @@ def find_by_key(body: str, key: str) -> TextMatch | None:
         end = body.find(opened, start)
         closer = opened
     else:
-        candidates = [
-            (body.find(c, start), c) for c in _CLOSERS if body.find(c, start) >= 0
-        ]
+        candidates = [(body.find(c, start), c) for c in _CLOSERS if body.find(c, start) >= 0]
         if not candidates:
             return None
         end, closer = min(candidates)
@@ -138,9 +223,41 @@ def find_by_key(body: str, key: str) -> TextMatch | None:
         # A runaway match means the anchor was wrong, not that the value is enormous.
         return None
 
-    return TextMatch(
-        value=value, key=key, left=left, right=closer, occurrences=body.count(left)
-    )
+    return TextMatch(value=value, key=key, left=left, right=closer, occurrences=body.count(left))
+
+
+def _value_in_input(body: str, value: str) -> TextMatch | None:
+    """When the value is a hidden input's, anchor on that input's own name.
+
+    The generic left-context scan would otherwise settle on `value="`, which every input on the
+    page shares - ambiguous, so rejected, so no extractor at all. Anchoring on `name="request"
+    value="` names the one field meant, and it is the boundary the emitted script needs to read
+    an auto-submitted interstitial back.
+    """
+    for tag in _INPUT_TAG.finditer(body):
+        if value not in tag.group(0):
+            continue
+        named = re.search(
+            r"\bname=([\"']?)(?P<key>[A-Za-z_][A-Za-z0-9_.\-]*)\1[^>]*?\bvalue=(?P<vq>[\"'])",
+            tag.group(0),
+            re.IGNORECASE,
+        )
+        if named is None:
+            continue
+        left = named.group(0)
+        quote = named.group("vq")
+        start = tag.start() + named.end()
+        end = body.find(quote, start)
+        if end < 0 or body[start:end] != value:
+            continue
+        return TextMatch(
+            value=value,
+            key=named.group("key"),
+            left=left,
+            right=quote,
+            occurrences=body.count(left),
+        )
+    return None
 
 
 def _closing_boundary(body: str, end: int, opened_with: str | None) -> str | None:

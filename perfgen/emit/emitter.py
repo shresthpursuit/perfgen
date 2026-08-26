@@ -249,14 +249,21 @@ def _sampler_node(
 
 
 def _content_type_headers(step: Step) -> dict[str, str]:
-    """Content-Type is set consistently: explicit when given, else inferred from a JSON body."""
+    """Content-Type is set consistently: explicit when given, else inferred from a JSON body.
+
+    Only when the spec has not already set one *in any spelling*. Header names are
+    case-insensitive and `dict.setdefault` is not, so a step writing `Content-type` used to get a
+    second `Content-Type` beside it - two of them in the emitted script, which Entra answers with
+    `400 Bad Request - Invalid Header`.
+    """
     headers = dict(step.headers)
+    if any(name.lower() == "content-type" for name in headers):
+        return headers
+
     if step.content_type:
-        headers.setdefault("Content-Type", step.content_type)
-    elif step.body:
-        stripped = step.body.lstrip()
-        if stripped.startswith(("{", "[")):
-            headers.setdefault("Content-Type", "application/json")
+        headers["Content-Type"] = step.content_type
+    elif step.body and step.body.lstrip().startswith(("{", "[")):
+        headers["Content-Type"] = "application/json"
     return headers
 
 

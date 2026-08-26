@@ -65,3 +65,27 @@ def login_page() -> str:
         "<form id='credentials' method='post'><input name='loginfmt' type='email'></form>"
         "</body></html>"
     )
+
+
+# An auto-submitted interstitial: the page a browser would POST onward without showing anyone.
+# Not an Entra shape - it is how HTML carries state through a redirect, and SAML's POST binding is
+# identical. The name and the value are separate attributes, so key-anchored scanning cannot see
+# it; `canary` here deliberately contains the literal text `CANARY:` inside its own value, which
+# is what a live tenant returned and what silently produced a wrong extraction.
+INTERSTITIAL_REQUEST = "rQQIARAA02I20jOwUjFKSzRequestBlob0123456789abcdef"
+INTERSTITIAL_FLOW_TOKEN = "BgABIQEAAAAdDD7nFlowTokenBlob9876543210zyxwvu"
+INTERSTITIAL_CANARY = "ZNGuujd3Dykkjt/TL2E01S6VmNYFGhiI6oR5YAmy8MQ=7:1:CANARY:tailportionABC123"
+
+
+def interstitial_page() -> str:
+    """The "Working..." page: a form the browser submits on load."""
+    return (
+        "<html><head><title>Working...</title></head><body>"
+        '<form method="POST" name="hiddenform" '
+        'action="https://device.login.microsoftonline.com:443/">'
+        f'<input type="hidden" name="request" value="{INTERSTITIAL_REQUEST}" />'
+        f'<input type="hidden" name="flowToken" value="{INTERSTITIAL_FLOW_TOKEN}" />'
+        f'<input type="hidden" name="canary" value="{INTERSTITIAL_CANARY}" />'
+        '<noscript><input type="submit" value="Submit" /></noscript>'
+        "</form></body></html>"
+    )
