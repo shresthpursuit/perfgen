@@ -331,6 +331,21 @@ class Auth(_Base):
         return self
 
     @property
+    def step_credential_refs(self) -> list[str]:
+        """Credential references the declared login steps carry inline.
+
+        Derived rather than stored: the references live in the step text, and a second copy in the
+        IR could disagree with it after a hand-edit.
+        """
+        from perfgen import secrets
+
+        found: list[str] = []
+        for step in self.flow_steps:
+            for text in (step.path, step.body or "", *step.headers.values()):
+                found.extend(secrets.references_in(text))
+        return list(dict.fromkeys(found))
+
+    @property
     def code_step(self) -> Step | None:
         """The auth flow step whose response carries the authorization code.
 

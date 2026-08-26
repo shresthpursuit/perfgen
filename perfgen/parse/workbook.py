@@ -19,6 +19,7 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+from perfgen import secrets
 from perfgen.ir.gaps import auth_gaps, flow_gaps, load_profile_gaps
 from perfgen.ir.models import (
     Application,
@@ -791,6 +792,16 @@ def _parse_auth_steps(workbook, collector: _Collector) -> list[Step]:
             )
 
         body = _column_text(cells, header, "Request body or parameters")
+        raw_headers = _column_text(cells, header, "Request headers")
+        for field_text in (path, body or "", raw_headers or ""):
+            if secrets.MALFORMED_SECRET_REF.search(field_text):
+                collector.warning(
+                    "auth.flow_steps.credentials",
+                    f"{location}: '{{secret:}}' has no reference name, so nothing will be "
+                    f"substituted and the literal text is sent. Write it as "
+                    f"'{{secret:pkce-login-password}}', naming the credential reference.",
+                )
+
         collected.append(
             Step(
                 index=step_no,
@@ -801,10 +812,7 @@ def _parse_auth_steps(workbook, collector: _Collector) -> list[Step]:
                 content_type=values.infer_content_type(body),
                 expected_status=expected_status,
                 headers=_parse_header_lines(
-                    _column_text(cells, header, "Request headers"),
-                    collector,
-                    "auth.flow_steps.headers",
-                    location,
+                    raw_headers, collector, "auth.flow_steps.headers", location
                 ),
             )
         )

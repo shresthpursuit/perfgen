@@ -397,3 +397,41 @@ def test_request_headers_reach_flow_steps_too(tmp_path):
 
     step = result.ir.flows[0].steps[0]
     assert step.headers == {"X-Trace-Id": "{traceId}"}
+
+
+# ------------------------------------------------------------------------------------------
+# Credential references in login steps
+
+
+def with_login_credentials() -> TestPlanIR:
+    ir = build_pkce_ir()
+    ir.auth.flow_steps[1].body = (
+        "login={secret:pkce-login-user}&passwd={secret:pkce-login-password}&ctx={sCtx}"
+    )
+    return ir
+
+
+def test_a_credential_reference_becomes_a_run_time_environment_lookup():
+    """Only the variable name is written. The value is read by JMeter when the script runs."""
+    xml = build_tree(with_login_credentials(), "5.6.3")[0].decode()
+
+    assert "System.getenv('PKCE_LOGIN_USER')" in xml
+    assert "System.getenv('PKCE_LOGIN_PASSWORD')" in xml
+    assert "{secret:" not in xml, "a reference was left unresolved in the script"
+
+
+def test_a_credential_reference_and_a_correlated_placeholder_coexist_in_one_body():
+    """They resolve from different places at different times, in the same string."""
+    xml = build_tree(with_login_credentials(), "5.6.3")[0].decode()
+
+    sign_in = xml.split('testname="Sign in"', 1)[1].split("</elementProp>", 1)[0]
+    assert "System.getenv('PKCE_LOGIN_USER')" in sign_in
+    assert "${sCtx}" in sign_in
+
+
+def test_the_references_are_discoverable_for_the_secrets_scan():
+    """publish scans by value, and can only do that for references it knows the spec declares."""
+    from perfgen.publish.secrets_scan import declared_references
+
+    ir = with_login_credentials()
+    assert "pkce-login-password" in declared_references(ir)

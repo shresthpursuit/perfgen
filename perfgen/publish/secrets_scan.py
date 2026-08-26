@@ -120,6 +120,10 @@ def declared_references(ir: TestPlanIR) -> list[str]:
         # A token parameter can be resolved by its own name when no reference matched it, so it is
         # a live credential even though it never appears in credential_refs.
         references.extend(ir.auth.token_request.param_names)
+    # `{secret:...}` written inline in a PKCE login step. These never appear in credential_refs -
+    # they are named in the step text - so without this the value pass has nothing to match a
+    # login password against.
+    references.extend(ir.auth.step_credential_refs)
     seen: dict[str, None] = {}
     for reference in references:
         seen.setdefault(reference, None)

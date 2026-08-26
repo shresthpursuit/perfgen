@@ -7,6 +7,7 @@ ended up) and by name (anything that looks like a credential, including values w
 from __future__ import annotations
 
 import json
+from urllib.parse import quote, unquote
 
 import pytest
 
@@ -158,3 +159,54 @@ def test_sensitive_key_detection(key):
 @pytest.mark.parametrize("key", ["username", "type", "subject", "quantity"])
 def test_ordinary_keys_are_not_sensitive(key):
     assert not is_sensitive_key(key)
+
+
+# ------------------------------------------------------------------------------------------
+# Encoding must not hide a value from the value pass
+#
+# Found while wiring credentials into PKCE login steps. Redaction ran structurally first and
+# scrubbed by value afterwards, on the re-encoded text - so a secret containing any character the
+# encoding touches was invisible to the value match. Redaction by key name masked it: `passwd` was
+# caught by its name while the same secret under `login` went straight through.
+
+
+def test_a_secret_survives_no_encoding_in_a_form_body():
+    secret = "p@ssw0rd+with/special=chars"
+    redactor = Redactor([secret])
+
+    encoded = f"custom={quote(secret, safe='')}&ctx=abc"
+    assert secret not in unquote(redactor.body(encoded, "application/x-www-form-urlencoded"))
+
+
+def test_a_secret_substituted_verbatim_into_a_form_body_is_still_caught():
+    """What the probe actually sends: the raw value dropped into the spec's own template."""
+    secret = "p@ssw0rd+with/special=chars"
+    redactor = Redactor([secret])
+
+    raw = f"custom={secret}&ctx=abc"
+    assert secret not in unquote(redactor.body(raw, "application/x-www-form-urlencoded"))
+
+
+def test_a_secret_under_an_innocuous_form_key_is_caught_by_value():
+    """`passwd` is caught by name; `login` is not, and used to leak."""
+    secret = "perf.tester@example.internal"
+    redactor = Redactor([secret])
+
+    body = f"login={secret}&ctx=abc"
+    assert secret not in unquote(redactor.body(body, "application/x-www-form-urlencoded"))
+
+
+def test_json_escaping_does_not_hide_a_secret():
+    secret = 'quote"and\backslash-value-1234'
+    redactor = Redactor([secret])
+
+    body = json.dumps({"note": secret, "ctx": "abc"})
+    assert secret not in json.loads(redactor.body(body, "application/json"))["note"]
+
+
+def test_a_non_ascii_secret_is_caught_in_json():
+    secret = "pässwörd-with-ümlauts-9f2c"
+    redactor = Redactor([secret])
+
+    body = json.dumps({"note": secret})
+    assert secret not in json.loads(redactor.body(body, "application/json"))["note"]

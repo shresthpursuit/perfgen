@@ -17,6 +17,44 @@ from pathlib import Path
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
+# An inline credential reference, as written in a workbook cell:
+#     login={secret:pkce-login-user}&passwd={secret:pkce-login-password}&ctx={sCtx}
+#
+# Deliberately distinct from the `{correlatedVar}` placeholder syntax, because the two resolve at
+# different times from different sources: a correlated variable is discovered from observed traffic
+# and written into the script, a credential is never written down at all and is read from the
+# environment when the script runs. Someone reading a cell should be able to tell which is which
+# without knowing the rules.
+#
+# The colon is load-bearing rather than decorative. `rewrite_placeholders` matches
+# `\{([A-Za-z_][A-Za-z0-9_]*)\}`, and the colon ends that character class before the closing brace,
+# so the two patterns are structurally incapable of matching the same text and no ordering between
+# the two rewrites has to be remembered. A `{{ref}}` form would not have that property: the inner
+# `{userId}` of `{{userId}}` matches the placeholder pattern and would be rewritten inside it.
+SECRET_REF = re.compile(r"\{secret:([A-Za-z_][A-Za-z0-9_.-]*)\}")
+
+# `{secret:}` and `{secret: }` - written by someone who meant to fill it in.
+MALFORMED_SECRET_REF = re.compile(r"\{secret:\s*\}")
+
+
+def references_in(text: str | None) -> list[str]:
+    """Every credential reference named in a string, in order, without repeats."""
+    if not text:
+        return []
+    return list(dict.fromkeys(SECRET_REF.findall(text)))
+
+
+def substitute(text: str, resolver) -> str:
+    """Replace every `{secret:name}` using `resolver(name)`.
+
+    One function for both callers, so the syntax has a single definition. The probe passes
+    `resolve` and gets real values to send; the emitter passes `naming.env_lookup` and gets a
+    run-time lookup to write into the script. Neither knows about the other.
+    """
+    if not text:
+        return text
+    return SECRET_REF.sub(lambda match: resolver(match.group(1)), text)
+
 
 class MissingSecret(RuntimeError):
     """A referenced secret is not set. Never substituted with a default or an empty string."""

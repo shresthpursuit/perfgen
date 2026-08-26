@@ -181,6 +181,31 @@ everywhere else in this tool: the human supplies structure, the machine supplies
   `_index_response` could only index JSON, so an HTML login page taught it nothing; and
   `_resolve_path` filled placeholders in the **path only**, so `content=step.body` sent
   `{"originalRequest":"{sCtx}"}` as literal text. Bodies and headers are now resolved too.
+- **Credentials in a login step are written `{secret:pkce-login-password}`.** Deliberately distinct
+  from `{correlatedVar}`, because the two resolve at different times from different sources and
+  someone reading a workbook cell should be able to tell which is which. The colon is load-bearing,
+  not decoration: `rewrite_placeholders` matches `\{([A-Za-z_][A-Za-z0-9_]*)\}`, and the colon ends
+  that character class before the closing brace, so the two patterns cannot match the same text and
+  no ordering between the rewrites has to be remembered. A `{{ref}}` form would not have that
+  property — the inner `{userId}` of `{{userId}}` matches the placeholder pattern. One definition in
+  `perfgen.secrets`; the emitter resolves it with `env_lookup`, the probe with `resolve`. Scoped to
+  auth flow steps: `application.additional_headers` stays literal-only and its deferral stays open.
+- **The probe substitutes credential values verbatim, and does not URL-encode them.** The emitted
+  script does not either, so a password needing encoding fails in both. That is the point: encoding
+  in the probe alone would make the probe succeed where the generated script fails, which is the
+  one disagreement worse than both failing.
+- **`add_secret` before anything is recorded — pinned by a test of the ordering, not the outcome.**
+  `RecordedCall` scrubs through the redactor, so a value reaching the recorder before registration
+  is a value written to disk. `_register_step_secrets` registers inside itself and returns
+  afterwards; `_record_auth_call` takes a `register` callback that runs *after* the request and
+  *before* the response is recorded, because the token exchange carries the access token in its
+  response body. A first version recorded that body first and wrote the token to disk.
+- **Redaction scrubs values while they are decoded, on the way in as well as out.** Found here:
+  `parse_qsl` decodes and `urlencode` re-encodes, so a password containing `@`, `+`, `/` or `=`
+  came back as `p%40ssw0rd%2B…` and the value pass afterwards had nothing to match. JSON does the
+  same with quotes, backslashes and non-ASCII. Redaction by key name masked it — `passwd` was
+  caught by its name while the same value under `login` went straight through. Fixed in
+  `Redactor.body`/`_redact_json`; pinned by `test_a_secret_under_an_innocuous_form_key_is_caught_by_value`.
 - **`Request headers` is a column on both `Flow steps` and `Auth flow steps`.** `Step.headers`
   existed in the IR and the emitter already wrote per-step `HeaderManager`s — only the parser never
   filled it. Needed independently of PKCE: a flow step carrying a correlated header was previously

@@ -19,8 +19,11 @@ Three rules shape it:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -109,6 +112,289 @@ def run_probe(
 # --------------------------------------------------------------------------------------------
 
 
+def _pkce_pair() -> tuple[str, str]:
+    """A verifier and its S256 challenge - RFC 7636, the same transformation the JMX performs."""
+    verifier = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("=")
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return verifier, base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _register_step_secrets(refs: list[str], redactor: Redactor) -> dict[str, str]:
+    """Resolve every credential the login steps name, registering each before returning any.
+
+    The ordering is the guarantee, not an implementation detail: `RecordedCall` runs its body and
+    headers through the redactor, so a value that reaches the recorder before `add_secret` is a
+    value written to disk. Registration happens inside this function and the values leave it only
+    afterwards, so no arrangement of the caller can invert it.
+    """
+    resolved: dict[str, str] = {}
+    for reference in refs:
+        value = secrets.resolve(reference)
+        redactor.add_secret(value)
+        resolved[reference] = value
+    return resolved
+
+
+def _resolve_step_secrets(text_value: str, resolved: dict[str, str]) -> str:
+    """Substitute `{secret:name}` from values already resolved and handed to the redactor.
+
+    Takes a mapping rather than resolving here, so resolution and `add_secret` stay together at one
+    call site. The value is substituted verbatim, exactly as the generated script will substitute
+    it at run time - encoding it here and not there would make the probe succeed where the script
+    fails, which is the one disagreement that is worse than both failing.
+    """
+    return secrets.substitute(text_value, lambda name: resolved.get(name, f"{{secret:{name}}}"))
+
+
+def _pkce_client_credential(ir: TestPlanIR) -> str:
+    """The client id, resolved from the environment like every other credential."""
+    from perfgen.emit import naming
+
+    request = ir.auth.token_request
+    refs = request.credential_refs if request else []
+    matched = naming.match_credential_ref("client_id", refs)
+    return secrets.resolve(matched or "client_id")
+
+
+def _authorization_code(response: httpx.Response) -> str | None:
+    location = response.headers.get("location", "")
+    match = re.search(r"[?&#]code=([^&#]+)", location)
+    return match.group(1) if match else None
+
+
+def _origin_of(url: str) -> str:
+    parts = httpx.URL(url)
+    return f"{parts.scheme}://{parts.netloc.decode()}"
+
+
+def _record_auth_call(
+    http: httpx.Client,
+    record: ProbeRecord,
+    redactor: Redactor,
+    outcome: ProbeOutcome,
+    name: str,
+    method: str,
+    url: str,
+    body: str | None,
+    headers: dict[str, str],
+    *,
+    follow_redirects: bool = True,
+    register: Callable[[httpx.Response], None] | None = None,
+) -> httpx.Response | None:
+    """Make one call in the auth sequence and record it, redacted.
+
+    `register` exists because a response can carry a credential the request did not: the token
+    exchange answers with the access token in its body. It runs after the request and before the
+    response is recorded, which puts that ordering inside this function rather than leaving it to
+    be re-established correctly at every call site. Getting it wrong writes the token to disk, and
+    a first version of this did exactly that.
+    """
+    call = RecordedCall(
+        name=name,
+        request=RecordedRequest(
+            method=method,
+            url=url,
+            headers=redactor.headers(headers),
+            body=redactor.body(body, headers.get("Content-Type")),
+        ),
+    )
+    try:
+        response = http.request(
+            method, url, content=body, headers=headers, follow_redirects=follow_redirects
+        )
+    except httpx.HTTPError as exc:
+        call.error = f"{type(exc).__name__}: {exc}"
+        record.calls.append(call)
+        outcome.warnings.append(f"{name} could not be called: {exc}")
+        return None
+
+    if register is not None:
+        register(response)
+    call.response = _record_response(response, redactor)
+    record.calls.append(call)
+    return response
+
+
+def _acquire_pkce_token(
+    ir: TestPlanIR,
+    http: httpx.Client,
+    record: ProbeRecord,
+    redactor: Redactor,
+    outcome: ProbeOutcome,
+) -> str | None:
+    """Walk the whole PKCE exchange: authorize, the declared login steps, then the token call.
+
+    Every request is recorded, so correlation sees the login sequence as observed traffic and its
+    extractors come from what actually came back rather than from placeholder names.
+    """
+    auth = ir.auth
+    request_spec = auth.token_request
+    if request_spec is None or not auth.authorize_url:
+        return None
+
+    try:
+        step_secrets = _register_step_secrets(auth.step_credential_refs, redactor)
+        client_id = _pkce_client_credential(ir)
+    except RuntimeError as exc:
+        _degrade(record, outcome, str(exc))
+        return None
+
+    for cookie in auth.seed_cookies:
+        http.cookies.set(cookie.name, cookie.value, domain=cookie.domain, path=cookie.path)
+
+    verifier, challenge = _pkce_pair()
+    seen: dict[str, tuple[str, str]] = {}
+
+    authorize_url = f"{auth.authorize_url}?" + urlencode(
+        {
+            "response_type": "code",
+            "client_id": client_id,
+            "scope": auth.scope or "",
+            "redirect_uri": auth.redirect_uri or "",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+    )
+    response = _record_auth_call(
+        http, record, redactor, outcome, "Authorize", "GET", authorize_url, None, {}
+    )
+    if response is None:
+        _degrade(record, outcome, "the /authorize request could not be made")
+        return None
+    _index_response(response, seen, wanted=_outstanding(auth.flow_steps, 0))
+
+    code = _walk_auth_steps(ir, http, record, redactor, outcome, seen, step_secrets)
+    if code is None:
+        return None
+
+    body = urlencode(
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": auth.redirect_uri or "",
+            "code_verifier": verifier,
+            "client_id": client_id,
+        }
+    )
+    # The token arrives in this response's body, so it must be registered with the redactor before
+    # that body is recorded - see `_record_auth_call`.
+    issued: list[tuple[str | None, str | None]] = []
+
+    def register_token(response: httpx.Response) -> None:
+        token, expr = _find_token(response)
+        if token:
+            redactor.add_secret(token)
+        issued.append((token, expr))
+
+    response = _record_auth_call(
+        http,
+        record,
+        redactor,
+        outcome,
+        "Exchange code for token",
+        "POST",
+        request_spec.url,
+        body,
+        {"Content-Type": "application/x-www-form-urlencoded"},
+        register=register_token,
+    )
+    if response is None or response.status_code != 200:
+        _degrade(
+            record,
+            outcome,
+            f"the token exchange returned "
+            f"{response.status_code if response else 'no response'}, not 200",
+        )
+        return None
+
+    token, expr = issued[0] if issued else (None, None)
+    if token is None:
+        _degrade(record, outcome, "the token exchange succeeded but carried no access token")
+        return None
+
+    outcome.token_expr = expr
+    outcome.token_confidence = TokenConfidence.VERIFIED
+    return token
+
+
+def _walk_auth_steps(
+    ir: TestPlanIR,
+    http: httpx.Client,
+    record: ProbeRecord,
+    redactor: Redactor,
+    outcome: ProbeOutcome,
+    seen: dict[str, tuple[str, str]],
+    step_secrets: dict[str, str],
+) -> str | None:
+    """Run each declared login step, returning the authorization code the last one yields."""
+    auth = ir.auth
+    code_step = auth.code_step
+    base = _origin_of(auth.authorize_url or "")
+
+    for step in auth.flow_steps:
+        path, _, _, unresolved = _resolve_path(step.path, seen, seen)
+        url = path if "://" in path else f"{base}{path}"
+
+        body_text, _, _, body_unresolved = _resolve_path(step.body or "", seen, seen)
+        headers, _, _, header_unresolved = _resolve_headers(step.headers, seen, seen)
+        if step.content_type:
+            headers.setdefault("Content-Type", step.content_type)
+
+        missing = [*unresolved, *body_unresolved, *header_unresolved]
+        if missing:
+            outcome.warnings.append(
+                f"Auth step {step.index} ({step.name}): nothing supplied "
+                f"{', '.join('{' + name + '}' for name in missing)}, so the request was sent with "
+                f"the placeholder text in place and probably failed."
+            )
+
+        body_text = _resolve_step_secrets(body_text, step_secrets)
+        headers = {k: _resolve_step_secrets(v, step_secrets) for k, v in headers.items()}
+
+        is_code_step = code_step is not None and step.index == code_step.index
+        response = _record_auth_call(
+            http,
+            record,
+            redactor,
+            outcome,
+            step.name,
+            step.method.value,
+            url,
+            body_text or None,
+            headers,
+            # Explicit, never inherited. The authorization code arrives in a Location header, and a
+            # followed redirect consumes it before anything can read it. httpx happens to default
+            # to not following, which is exactly the kind of unstated default the reference script
+            # relies on and which one library upgrade would quietly reverse.
+            follow_redirects=not is_code_step,
+        )
+        if response is None:
+            _degrade(record, outcome, f"auth step {step.index} ({step.name}) could not be called")
+            return None
+        if response.status_code != step.expected_status:
+            outcome.warnings.append(
+                f"Auth step {step.index} ({step.name}) returned {response.status_code}, not the "
+                f"expected {step.expected_status}."
+            )
+
+        _index_response(response, seen, wanted=_outstanding(auth.flow_steps, step.index))
+
+        if is_code_step:
+            code = _authorization_code(response)
+            if code is None:
+                _degrade(
+                    record,
+                    outcome,
+                    f"auth step {step.index} ({step.name}) was expected to produce an "
+                    f"authorization code in its Location header, and did not",
+                )
+                return None
+            return code
+
+    _degrade(record, outcome, "no auth flow step produced an authorization code")
+    return None
+
+
 def _acquire_token(
     ir: TestPlanIR,
     http: httpx.Client,
@@ -121,6 +407,9 @@ def _acquire_token(
 
     if ir.auth.type.is_static_credential:
         return _static_credential(ir, record, redactor, outcome)
+
+    if ir.auth.type is AuthType.OAUTH2_PKCE:
+        return _acquire_pkce_token(ir, http, record, redactor, outcome)
 
     request_spec = ir.auth.token_request
     if request_spec is None:

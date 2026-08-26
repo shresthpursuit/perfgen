@@ -123,16 +123,30 @@ class Redactor:
         if body is None:
             return None
 
-        redacted = self._structured_body(body, content_type)
+        # Scrubbed on the way in as well as on the way out. A value substituted into a template
+        # verbatim - which is what the probe does with `{secret:...}`, so that it sends exactly
+        # what the generated script will send - sits in the raw text unencoded; `parse_qsl` would
+        # then mangle it past recognition before any value match could be attempted.
+        redacted = self._structured_body(self.scrub(body) or "", content_type)
         return self.scrub(redacted)
 
     def _structured_body(self, body: str, content_type: str | None) -> str:
+        """Redact structurally, scrubbing each leaf *while it is decoded*.
+
+        The scrubbing has to happen inside this pass rather than only on the result, because both
+        encodings hide a value from a literal match. `parse_qsl` decodes and `urlencode` re-encodes,
+        so a password containing `@`, `+`, `/` or `=` - an entirely ordinary generated one - comes
+        back out as `p%40ssw0rd%2B...` and the value pass afterwards has nothing to match. JSON does
+        the same with quotes, backslashes and non-ASCII. Redaction by key name still caught the
+        obvious spellings, which is what made this hard to notice: `passwd` was redacted while the
+        same secret under `login` survived.
+        """
         kind = (content_type or "").lower()
         stripped = body.lstrip()
 
         if "json" in kind or stripped.startswith(("{", "[")):
             try:
-                return json.dumps(_redact_json(json.loads(body)))
+                return json.dumps(_redact_json(json.loads(body), self.scrub))
             except (ValueError, TypeError):
                 pass
 
@@ -141,7 +155,10 @@ class Redactor:
                 pairs = parse_qsl(body, keep_blank_values=True)
                 if pairs:
                     return urlencode(
-                        [(k, REDACTED if is_sensitive_key(k) else v) for k, v in pairs]
+                        [
+                            (k, REDACTED if is_sensitive_key(k) else (self.scrub(v) or ""))
+                            for k, v in pairs
+                        ]
                     )
             except ValueError:
                 pass
@@ -153,14 +170,21 @@ class Redactor:
         return dict.fromkeys(cookies, REDACTED)
 
 
-def _redact_json(node):
+def _redact_json(node, scrub):
+    """Redact by key name, and scrub every string leaf while it is still decoded.
+
+    `json.dumps` escapes quotes, backslashes and non-ASCII, any of which would hide a known value
+    from a literal match performed on the serialised text afterwards.
+    """
     if isinstance(node, dict):
         return {
-            key: REDACTED if is_sensitive_key(str(key)) else _redact_json(value)
+            key: REDACTED if is_sensitive_key(str(key)) else _redact_json(value, scrub)
             for key, value in node.items()
         }
     if isinstance(node, list):
-        return [_redact_json(item) for item in node]
+        return [_redact_json(item, scrub) for item in node]
+    if isinstance(node, str):
+        return scrub(node)
     return node
 
 

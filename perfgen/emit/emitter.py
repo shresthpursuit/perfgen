@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 
 import yaml
 
+from perfgen import secrets
 from perfgen.emit import naming
 from perfgen.emit.apportion import apportion_float, largest_remainder
 from perfgen.emit.assembler import Node, build_document, node, to_xml
@@ -472,6 +473,19 @@ def _authorize_sampler(ir: TestPlanIR) -> Node:
     return sampler
 
 
+def _rewrite_step_text(text: str, scopes: dict[str, Scope]) -> str:
+    """Both rewrites an auth step's text needs, in one place.
+
+    `{correlatedVar}` becomes a JMeter variable reference; `{secret:some-ref}` becomes a run-time
+    environment lookup. The two patterns cannot match the same text - see `secrets.SECRET_REF` -
+    so the order here is presentation, not correctness.
+
+    Only the reference *name* is ever written. The value is read by the script at run time and
+    never passes through this process.
+    """
+    return secrets.substitute(rewrite_placeholders(text, scopes), naming.env_lookup)
+
+
 def _auth_flow_sampler(ir: TestPlanIR, step: Step) -> Node:
     """One declared login step, with its extractors and headers.
 
@@ -492,9 +506,9 @@ def _auth_flow_sampler(ir: TestPlanIR, step: Step) -> Node:
         protocol=protocol,
         domain=domain,
         port=port,
-        path=rewrite_placeholders(path, scopes),
+        path=_rewrite_step_text(path, scopes),
         method=step.method.value,
-        body=rewrite_placeholders(step.body or "", scopes),
+        body=_rewrite_step_text(step.body or "", scopes),
         follow_redirects="false" if is_code_step else "true",
         connect_timeout_ms=CONNECT_TIMEOUT_MS,
         response_timeout_ms=RESPONSE_TIMEOUT_MS,
@@ -503,7 +517,7 @@ def _auth_flow_sampler(ir: TestPlanIR, step: Step) -> Node:
     # Rewrite after merging, not before: _content_type_headers re-reads step.headers, so rewriting
     # first and merging second puts the raw {placeholder} straight back.
     headers = {
-        name: rewrite_placeholders(value, scopes)
+        name: _rewrite_step_text(value, scopes)
         for name, value in _content_type_headers(step).items()
     }
     header_node = _headers_node(headers, f"{step.name} headers")
