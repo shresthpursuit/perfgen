@@ -456,3 +456,34 @@ def test_a_spec_spelling_content_type_differently_does_not_get_two():
     names = [n.lower() for n in re.findall(r'name="Header\.name">([^<]+)<', block)]
     assert names.count("content-type") == 1, f"duplicate Content-Type: {names}"
     assert "charset=UTF-8" in block, "the spec's own spelling and value should be the one kept"
+
+
+def test_a_jmeter_reference_in_a_url_is_never_percent_encoded(pkce_xml):
+    """Found by running the emitted script under real JMeter, not by any fixture.
+
+    `urlencode(..., safe="${}")` encoded the parentheses and quotes *inside*
+    `${__groovy(System.getenv('X'))}`, so JMeter no longer recognised it as a function and passed
+    it through as literal text. The surviving braces then failed the URI parser outright:
+    `java.net.URISyntaxException: Illegal character in query`. A reference is markup JMeter
+    substitutes before the request exists, so no part of it may be encoded.
+    """
+    authorize = pkce_xml.split('testname="Authorize"', 1)[1].split("</HTTPSamplerProxy>", 1)[0]
+    path = re.search(
+        r'<stringProp name="HTTPSampler.path">([^<]*)</stringProp>', authorize
+    ).group(1)
+
+    assert "System.getenv(" in path, "the groovy call was mangled"
+    assert "%28" not in path and "%29" not in path, "parentheses were encoded"
+    assert "%27" not in path, "the quote was encoded"
+
+    # Literals still are encoded - this is not a licence to stop encoding.
+    assert "%3A%2F%2F" in path, "the redirect_uri should still be percent-encoded"
+
+
+def test_the_token_body_encodes_literals_but_not_references(pkce_xml):
+    exchange = pkce_xml.split('testname="Exchange code for token"', 1)[1]
+    body = exchange.split("</elementProp>", 1)[0]
+
+    assert "System.getenv(" in body
+    assert "%28" not in body
+    assert "grant_type=authorization_code" in body

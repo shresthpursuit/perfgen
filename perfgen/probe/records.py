@@ -19,6 +19,13 @@ class _Base(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# The generated /authorize call in a PKCE sequence, which is not a declared step. Zero because
+# the parser requires declared step numbers to be 1 or greater, so it can never collide with
+# one. Lives here rather than in the runner because both the probe that writes it and the
+# correlation engine that reads it need it, and runner imports correlate.
+AUTHORIZE_STEP_INDEX = 0
+
+
 class RecordedRequest(_Base):
     method: str
     url: str

@@ -27,7 +27,7 @@ from perfgen.correlate.models import (
 )
 from perfgen.correlate.scan import TEXT_FORMAT, find_candidates
 from perfgen.ir.models import Confidence, Extract, ExtractorType, Scope, Source, TestPlanIR
-from perfgen.probe.records import ProbeRecord
+from perfgen.probe.records import AUTHORIZE_STEP_INDEX, ProbeRecord
 
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -126,21 +126,40 @@ def correlate(
 # --------------------------------------------------------------------------------------------
 
 
+def _extract_target(ir: TestPlanIR, candidate: Candidate) -> list[Extract] | None:
+    """Which list of extractors this candidate belongs on.
+
+    A flow step keeps its own; the PKCE auth sequence has two other homes. Its declared login
+    steps each keep theirs, and the generated /authorize call has no Step at all - it is built
+    from the spec rather than declared - so its extractors live on `auth.authorize_extracts`.
+    """
+    if candidate.source_flow_id is None:
+        if candidate.source_step_index == AUTHORIZE_STEP_INDEX:
+            return ir.auth.authorize_extracts
+        step = next(
+            (s for s in ir.auth.flow_steps if s.index == candidate.source_step_index), None
+        )
+        return step.extracts if step is not None else None
+
+    flow = ir.flow(candidate.source_flow_id)
+    if flow is None:
+        return None
+    step = next((s for s in flow.steps if s.index == candidate.source_step_index), None)
+    return step.extracts if step is not None else None
+
+
 def _write_extract(
     ir: TestPlanIR, candidate: Candidate, decision: Adjudication, probe_observed: bool
 ) -> bool:
     """Attach an extractor to the step whose response produced the value."""
-    flow = ir.flow(candidate.source_flow_id) if candidate.source_flow_id else None
-    if flow is None:
+    target = _extract_target(ir, candidate)
+    if target is None:
         return False
-    step = next((s for s in flow.steps if s.index == candidate.source_step_index), None)
-    if step is None:
-        return False
-    if any(existing.var == decision.var for existing in step.extracts):
+    if any(existing.var == decision.var for existing in target):
         return False
 
     confidence = confidence_for(decision, probe_observed)
-    step.extracts.append(
+    target.append(
         Extract(
             var=decision.var,
             source=candidate.as_ir_source(),

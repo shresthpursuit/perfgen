@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote
 
 import yaml
 
@@ -445,20 +445,39 @@ def _pkce_sequence(ir: TestPlanIR, warnings: list[str], *, publish_global: bool)
     return elements
 
 
+def _encoded_pairs(pairs: list[tuple[str, str]]) -> str:
+    """Build a query string, encoding literals and leaving JMeter references untouched.
+
+    `urlencode` cannot be used here. A JMeter reference is not data - it is markup the server never
+    sees, because JMeter substitutes it first - and percent-encoding any part of it stops JMeter
+    recognising it at all. `${__groovy(System.getenv('X'))}` came out as
+    `${__groovy%28System.getenv%28%27X%27%29%29}`, which JMeter passed through as literal text, and
+    the surviving braces then failed the URI parser with `Illegal character in query`. Widening
+    `urlencode`'s `safe` set would work only for exactly the characters today's functions happen to
+    use; not encoding references at all is the property that stays true.
+    """
+    rendered = []
+    for name, value in pairs:
+        if "${" in value:
+            rendered.append(f"{name}={value}")
+        else:
+            rendered.append(f"{name}={quote(value, safe='')}")
+    return "&".join(rendered)
+
+
 def _authorize_sampler(ir: TestPlanIR) -> Node:
     """GET /authorize with the RFC parameters. Returns the login page, not a redirect."""
     auth = ir.auth
     protocol, domain, port, path = naming.split_url(auth.authorize_url or "")
-    query = urlencode(
-        {
-            "response_type": "code",
-            "client_id": _pkce_client_id(ir),
-            "scope": auth.scope or "",
-            "redirect_uri": auth.redirect_uri or "",
-            "code_challenge": f"${{{CHALLENGE_VAR}}}",
-            "code_challenge_method": "S256",
-        },
-        safe="${}",
+    query = _encoded_pairs(
+        [
+            ("response_type", "code"),
+            ("client_id", _pkce_client_id(ir)),
+            ("scope", auth.scope or ""),
+            ("redirect_uri", auth.redirect_uri or ""),
+            ("code_challenge", f"${{{CHALLENGE_VAR}}}"),
+            ("code_challenge_method", "S256"),
+        ]
     )
     sampler = node(
         "http_sampler",
@@ -566,15 +585,14 @@ def _pkce_token_sampler(ir: TestPlanIR, warnings: list[str], *, publish_global: 
     assert token is not None and request is not None  # guaranteed by Auth validation
 
     protocol, domain, port, path = naming.split_url(request.url)
-    body = urlencode(
-        {
-            "grant_type": "authorization_code",
-            "code": f"${{{CODE_VAR}}}",
-            "redirect_uri": auth.redirect_uri or "",
-            "code_verifier": f"${{{VERIFIER_VAR}}}",
-            "client_id": _pkce_client_id(ir),
-        },
-        safe="${}()'",
+    body = _encoded_pairs(
+        [
+            ("grant_type", "authorization_code"),
+            ("code", f"${{{CODE_VAR}}}"),
+            ("redirect_uri", auth.redirect_uri or ""),
+            ("code_verifier", f"${{{VERIFIER_VAR}}}"),
+            ("client_id", _pkce_client_id(ir)),
+        ]
     )
 
     sampler = node(

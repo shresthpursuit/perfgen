@@ -195,6 +195,10 @@ def declared_bindings(record: ProbeRecord) -> dict[tuple[int, str], str]:
 
 TEXT_FORMAT = "text"
 
+# Stands in for the flow id on a call that is part of the auth sequence rather than a flow.
+# `Candidate.used_flow_id` is required, and an auth step genuinely has no flow.
+AUTH_FLOW_ID = "AUTH"
+
 # Below this a token is not worth searching for: the low-entropy filter would reject it anyway,
 # and short strings collide constantly in a page full of markup.
 _MIN_TEXT_TOKEN = 8
@@ -290,8 +294,16 @@ def find_candidates(record: ProbeRecord) -> ScanResult:
 
             for used_position in range(source_position + 1, len(calls)):
                 later = calls[used_position]
-                if later.flow_id is None:
-                    continue  # the auth call is never a consumer of flow data
+                if later.flow_id is None and call.flow_id is not None:
+                    # A flow's response never feeds an auth call. The ordering already guarantees
+                    # that - auth runs first - so this is documentation more than a filter.
+                    #
+                    # What it used to say was `later.flow_id is None: continue`, which also
+                    # blocked an auth call consuming from an *earlier auth call*. That was right
+                    # when auth was a single token request and wrong the moment PKCE arrived: its
+                    # login sequence is several steps that feed each other, and with this blanket
+                    # skip the whole sequence produced no candidates at all.
+                    continue
 
                 where = _find_use(value, later)
                 if where is None:
@@ -344,7 +356,7 @@ def find_candidates(record: ProbeRecord) -> ScanResult:
                         source_step_name=call.name,
                         source_kind=kind,
                         source_location=location,
-                        used_flow_id=later.flow_id,
+                        used_flow_id=later.flow_id or AUTH_FLOW_ID,
                         used_step_index=later.step_index or 0,
                         used_step_name=later.name,
                         used_kind=used_kind,
