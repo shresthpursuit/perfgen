@@ -60,6 +60,14 @@ everywhere else in this tool: the human supplies structure, the machine supplies
 - **Always write commit messages to a file and use `git commit -F <file>`.** Never `-m` with
   inline quoting: `@'...'` is PowerShell here-string syntax and is passed through literally by
   bash, which has twice produced a commit titled `@x`. A message file has no quoting to get wrong.
+- **Nothing reaches `main` before its gate — which is not the same as `main` ending up
+  gate-passed.** Work goes on a branch, the gate runs, and only then does it merge. The weaker
+  reading is only checkable in hindsight, and by then the commit is already there; the rule as
+  written is checkable at the moment of committing, which is the moment it has to hold. Broken
+  once by committing a token-body fix straight to `main` and running its gate afterwards — the
+  gate passed, so nothing was wrong with `main` in the end, and that is exactly why the weaker
+  reading is not the rule. Same category as the blanket-add and `try/finally` rules: mechanical,
+  checkable, and not reliant on remembering.
 - **Never `git add -A`, `git add .`, or any blanket add. Name the paths.** This tree routinely
   holds untracked files that must never be committed — a spec workbook for a real tenant, a probe
   record, a hand-built reference script — and a blanket add does not distinguish them from the
