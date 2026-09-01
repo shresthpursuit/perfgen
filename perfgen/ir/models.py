@@ -210,6 +210,19 @@ class TokenRequest(_Base):
         default_factory=list, description="secret reference names only"
     )
 
+    @property
+    def sends_json(self) -> bool:
+        """Whether the token body is JSON rather than form-encoded.
+
+        One definition, here beside the field it interprets, because the probe and the emitter both
+        need it and must never disagree. They did: both built a form-encoded body unconditionally
+        while sending whatever Content-Type the workbook declared, so a spec saying
+        `application/json` posted `username=...&password=...` under a JSON header and the server
+        answered with a parse error. Anything unrecognised stays form-encoded, which is what OAuth
+        specifies and what every other spec in this repository uses.
+        """
+        return "json" in (self.content_type or "").lower()
+
 
 class TokenExtract(_Base):
     var: str = Field(description="variable/property name the token is published under")

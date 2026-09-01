@@ -6,6 +6,7 @@ script diffs cleanly against the one in review.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -333,10 +334,16 @@ def _token_sampler(ir: TestPlanIR, warnings: list[str], *, publish_global: bool)
 
     # Credentials are read from the environment at run time. No secret value is ever written here,
     # only the name of the environment variable the value will come from.
-    body = "&".join(
-        f"{name}={naming.env_lookup(_credential_for(name, request, warnings))}"
+    #
+    # The encoding follows the declared Content-Type, by the same rule the probe uses - see
+    # `TokenRequest.sends_json`. Both used to build a form body unconditionally, so a JSON token
+    # endpoint got form text under a JSON header. Changing one and not the other is the failure
+    # mode this project keeps meeting: the probe would succeed and the generated script would fail.
+    pairs = [
+        (name, naming.env_lookup(_credential_for(name, request, warnings)))
         for name in request.param_names
-    )
+    ]
+    body = json.dumps(dict(pairs)) if request.sends_json else _encoded_pairs(pairs)
 
     sampler = node(
         "http_sampler",

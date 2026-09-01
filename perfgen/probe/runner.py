@@ -463,7 +463,9 @@ def _acquire_token(
         redactor.add_secret(value)
 
     try:
-        body = _token_body(request_spec.param_names, resolved)
+        body = _token_body(
+            request_spec.param_names, resolved, sends_json=request_spec.sends_json
+        )
     except secrets.MissingSecrets as exc:
         _degrade(record, outcome, str(exc))
         return None
@@ -541,7 +543,9 @@ def _static_credential(
     return resolved[refs[0]]
 
 
-def _token_body(param_names: list[str], resolved: dict[str, str]) -> str:
+def _token_body(
+    param_names: list[str], resolved: dict[str, str], sends_json: bool = False
+) -> str:
     """Build the token request body, matching each parameter to a credential by name.
 
     A parameter with no matching credential reference is still a value the spec did not supply -
@@ -549,6 +553,12 @@ def _token_body(param_names: list[str], resolved: dict[str, str]) -> str:
     not there either, that is a missing input, not a reason to send an empty string: an empty
     `client_id` produces an authentication failure that looks like a broken API rather than a
     missing variable.
+
+    The encoding follows the declared Content-Type. It used to be form-encoded unconditionally
+    while the header said whatever the workbook declared, so a JSON token endpoint received
+    `username=...&password=...` and replied that it was not valid JSON. Only the last line branches:
+    resolution, matching and the missing-credential error are identical either way, and the
+    credentials have already been handed to the redactor before this is called.
     """
     from perfgen.emit.naming import match_credential_ref
 
@@ -567,7 +577,7 @@ def _token_body(param_names: list[str], resolved: dict[str, str]) -> str:
 
     if missing:
         raise secrets.MissingSecrets(missing)
-    return urlencode(parts)
+    return json.dumps(dict(parts)) if sends_json else urlencode(parts)
 
 
 def _find_token(response: httpx.Response) -> tuple[str | None, str | None]:
