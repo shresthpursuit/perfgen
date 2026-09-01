@@ -183,3 +183,61 @@ def test_probe_and_emitter_carry_the_same_parameters(content_type):
         assert set(json.loads(probe_body)) == set(json.loads(emitted))
     else:
         assert set(parse_qs(probe_body)) == set(parse_qs(emitted.replace("&amp;", "&")))
+
+
+# ------------------------------------------------------------------------------------------
+# Every credential in the token response, not only the one the script uses
+
+
+def token_response(payload: dict) -> object:
+    import httpx
+
+    return httpx.Response(200, json=payload)
+
+
+def test_a_refresh_token_is_registered_alongside_the_access_token():
+    """DummyJSON returns both. Only the access token used to be registered, so the refresh token -
+    the longer-lived credential of the two - was written to the probe record verbatim."""
+    from perfgen.probe.runner import _register_response_credentials
+
+    redactor = Redactor()
+    response = token_response(
+        {"accessToken": "access-value-abcdef123456", "refreshToken": "refresh-value-9876543210",
+         "username": "emilys", "id": 1}
+    )
+
+    _register_response_credentials(response, redactor)
+    scrubbed = redactor.scrub(response.text)
+
+    assert "access-value-abcdef123456" not in scrubbed
+    assert "refresh-value-9876543210" not in scrubbed, "the refresh token reached the record"
+    # Everything else stays intact - correlation reads these bodies.
+    assert "emilys" in scrubbed
+
+
+@pytest.mark.parametrize(
+    "key", ["refresh_token", "refreshToken", "access_token", "accessToken", "id_token", "jwt"]
+)
+def test_every_credential_shaped_response_field_is_registered(key):
+    from perfgen.probe.runner import _register_response_credentials
+
+    redactor = Redactor()
+    response = token_response({key: "the-credential-value-0123456789"})
+
+    _register_response_credentials(response, redactor)
+
+    assert "the-credential-value-0123456789" not in redactor.scrub(response.text)
+
+
+def test_an_ordinary_field_is_left_alone():
+    """Redacting more than credentials would blind correlation, which reads these bodies."""
+    from perfgen.probe.runner import _register_response_credentials
+
+    redactor = Redactor()
+    response = token_response({"sessionId": "correlate-me-0123456789", "accessToken": "tok-abc123"})
+
+    _register_response_credentials(response, redactor)
+    scrubbed = redactor.scrub(response.text)
+
+    assert "correlate-me-0123456789" in scrubbed
+    assert "tok-abc123" not in scrubbed

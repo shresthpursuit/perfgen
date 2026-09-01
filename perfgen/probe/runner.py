@@ -52,8 +52,16 @@ from perfgen.probe.redact import Redactor
 
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
-# Where an OAuth response usually carries the token, most specific first.
+# Where an OAuth response usually carries the token, most specific first. This is the field the
+# generated script will read.
 _TOKEN_KEYS = ("access_token", "accessToken", "id_token", "idToken", "token", "jwt")
+
+# Every field in a token response that carries a credential, which is broader than the one the
+# script uses. A refresh token is never a correlation candidate and outlives the access token,
+# so it is registered with the redactor too - see _register_response_credentials.
+_CREDENTIAL_RESPONSE_KEYS = frozenset(
+    {*_TOKEN_KEYS, "refresh_token", "refreshToken", "refresh"}
+)
 
 DEFAULT_TIMEOUT_S = 30
 
@@ -312,6 +320,7 @@ def _acquire_pkce_token(
 
     def register_token(response: httpx.Response) -> None:
         token, expr = _find_token(response)
+        _register_response_credentials(response, redactor)
         if token:
             redactor.add_secret(token)
         issued.append((token, expr))
@@ -493,6 +502,7 @@ def _acquire_token(
         return None
 
     token, expr = _find_token(response)
+    _register_response_credentials(response, redactor)
     if token:
         redactor.add_secret(token)
         outcome.token_expr = expr
@@ -578,6 +588,40 @@ def _token_body(
     if missing:
         raise secrets.MissingSecrets(missing)
     return json.dumps(dict(parts)) if sends_json else urlencode(parts)
+
+
+def _register_response_credentials(response: httpx.Response, redactor: Redactor) -> None:
+    """Hand every credential the token response carries to the redactor, not only the one used.
+
+    `_find_token` picks the single token the generated script will read. A token endpoint usually
+    returns more than that: DummyJSON answers with both `accessToken` and `refreshToken`, and only
+    the first was ever registered, so the refresh token - the longer-lived credential of the two -
+    was written to the probe record verbatim.
+
+    Response bodies are otherwise kept intact because correlation reads them, but these fields are
+    never correlation candidates: a script re-authenticates rather than replaying a token. So
+    redacting them costs nothing and closes the gap.
+
+    Called at the same point the access token is registered, which is before the response is
+    recorded. That ordering is the guarantee - see `_record_auth_call`.
+    """
+    try:
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError):
+        return
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(value, str) and value and str(key) in _CREDENTIAL_RESPONSE_KEYS:
+                    redactor.add_secret(value)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
 
 
 def _find_token(response: httpx.Response) -> tuple[str | None, str | None]:
